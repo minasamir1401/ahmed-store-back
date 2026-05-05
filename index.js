@@ -4,6 +4,11 @@ const multer = require('multer');
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 require('dotenv').config();
+const fs = require('fs');
+
+if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
+  fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+}
 
 const app = express();
 const prisma = new PrismaClient();
