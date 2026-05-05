@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Category {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  image     String?
+  count     Int?      @default(0)
+  href      String?
+  products  Product[]
+  createdAt DateTime  @default(now())
+}
+
+model Brand {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  image     String?
+  products  Product[]
+  createdAt DateTime  @default(now())
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  title         String
+  desc          String?
+  features      String?
+  price         Float
+  oldPrice      Float?
+  discountType  String?
+  discountValue Float?
+  image         String
+  images        String?
+  sizes         String?
+  tag           String?
+  seoKeywords   String?
+  seoDesc       String?
+  category      Category @relation(fields: [categoryId], references: [id])
+  categoryId    String
+  brand         Brand?    @relation(fields: [brandId], references: [id])
+  brandId       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Offer {
+  id        String   @id @default(cuid())
+  title     String
+  discount  String
+  image     String
+  createdAt DateTime @default(now())
+}
+
+model Blog {
+  id        String   @id @default(cuid())
+  title     String
+  excerpt   String
+  content   String
+  image     String
+  category  String
+  readTime  String
+  date      String
+  createdAt DateTime @default(now())
+}
+
+model Hero {
+  id          String   @id @default("hero-section")
+  title       String   @default("العناية تبدأ من هنا")
+  subtitle    String   @default("مجموعة مختارة من أفضل منتجات العناية والشعر")
+  image       String   @default("https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80")
+  buttonText  String   @default("تسوق الآن")
+  buttonLink  String   @default("/products")
+  side1Title  String   @default("الأقسام")
+  side1Desc   String   @default("تصفح كافة التصنيفات")
+  side1Image  String   @default("https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80")
+  side1Link   String   @default("/categories")
+  side2Title  String   @default("عروض حصرية")
+  side2Desc   String   @default("خصومات لفترة محدودة")
+  side2Image  String   @default("https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80")
+  side2Link   String   @default("/offers")
+  updatedAt   DateTime @updatedAt
+}
