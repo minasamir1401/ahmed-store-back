@@ -46,6 +46,28 @@ app.post('/api/upload-multiple', upload.array('images', 10), (req, res) => {
   res.json({ urls });
 });
 
+// ── AI Endpoints ──────────────────────────────────────────────
+app.post('/api/ai/generate', async (req, res) => {
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY || ''}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(req.body)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(response.status).json(data);
+    }
+    res.json(data);
+  } catch (error) {
+    console.error('AI Proxy Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── Health Check ──────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ message: 'Mithaly Backend is running smoothly! 🚀' });
