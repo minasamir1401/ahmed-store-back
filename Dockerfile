@@ -7,12 +7,11 @@ RUN npm ci --only=production
 
 COPY . .
 
-ENV DATABASE_URL=file:./prisma/dev.db
+# DATABASE_URL should be provided via environment variables
 RUN npx prisma generate
 
-# Backup the initial database file as a template outside prisma to survive volume mount
-RUN mkdir -p prisma uploads prisma-backup && \
-    cp prisma/dev.db prisma-backup/dev.db.template 2>/dev/null || true
+# Ensure uploads directory exists
+RUN mkdir -p uploads
 
 RUN chmod +x entrypoint.sh
 
