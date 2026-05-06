@@ -97,3 +97,38 @@ model Hero {
   side2Link  String   @default("/offers")
   updatedAt  DateTime @updatedAt
 }
+
+model Order {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique
+  customerName  String
+  customerEmail String?
+  customerPhone String
+  governorate   String
+  district      String
+  address       String
+  building      String?
+  floor         String?
+  apartment     String?
+  notes         String?
+  paymentMethod String      @default("cod")
+  shippingFee   Float       @default(0)
+  total         Float
+  status        String      @default("pending")
+  shippingRef   String?
+  userId        String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  items         OrderItem[]
+}
+
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  title     String
+  price     Float
+  quantity  Int
+  image     String?
+}

@@ -334,6 +334,76 @@ app.patch('/api/hero', async (req, res) => {
   }
 });
 
+// ── Orders Routes ───────────────────────────────────────────────
+app.get('/api/orders', async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      include: { items: true },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(orders);
+  } catch (error) {
+    console.error('GET /api/orders error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/orders', async (req, res) => {
+  const {
+    customerName, customerEmail, customerPhone, governorate, district,
+    address, building, floor, apartment, notes, paymentMethod, total,
+    shippingFee, items, userId
+  } = req.body;
+
+  if (!customerName || !customerPhone || !governorate || !district || !address) {
+    return res.status(400).json({ error: 'Missing required customer fields' });
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Order items are required' });
+  }
+
+  try {
+    const count = await prisma.order.count();
+    const orderNumber = `ORD-${1000 + count + 1}`;
+
+    const order = await prisma.order.create({
+      data: {
+        orderNumber,
+        customerName,
+        customerEmail: customerEmail || null,
+        customerPhone,
+        governorate,
+        district,
+        address,
+        building: building || null,
+        floor: floor || null,
+        apartment: apartment || null,
+        notes: notes || null,
+        paymentMethod: paymentMethod || 'cod',
+        total: Number(total) || 0,
+        shippingFee: Number(shippingFee) || 0,
+        userId: userId || null,
+        items: {
+          create: items.map((item) => ({
+            productId: String(item.id || ''),
+            title: String(item.title || ''),
+            price: Number(item.price) || 0,
+            quantity: Number(item.quantity) || 1,
+            image: item.image || null
+          }))
+        }
+      },
+      include: { items: true }
+    });
+
+    res.status(201).json(order);
+  } catch (error) {
+    console.error('POST /api/orders error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── Error Handling Middleware ─────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled Error:', err);
