@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -42,8 +42,20 @@ model Product {
   seoDesc       String?
   category      Category @relation(fields: [categoryId], references: [id])
   categoryId    String
-  brand         Brand?    @relation(fields: [brandId], references: [id])
+  brand         Brand?   @relation(fields: [brandId], references: [id])
   brandId       String?
+  
+  sizesPrices    String?
+  productSpecs   String?
+  keyInfo        String?
+  certifications String?
+  overview       String?
+  warnings       String?
+  disclaimer     String?
+  directions     String?
+  ingredients    String?
+  supplementFacts String?
+
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }
@@ -69,19 +81,19 @@ model Blog {
 }
 
 model Hero {
-  id          String   @id @default("hero-section")
-  title       String   @default("العناية تبدأ من هنا")
-  subtitle    String   @default("مجموعة مختارة من أفضل منتجات العناية والشعر")
-  image       String   @default("https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80")
-  buttonText  String   @default("تسوق الآن")
-  buttonLink  String   @default("/products")
-  side1Title  String   @default("الأقسام")
-  side1Desc   String   @default("تصفح كافة التصنيفات")
-  side1Image  String   @default("https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80")
-  side1Link   String   @default("/categories")
-  side2Title  String   @default("عروض حصرية")
-  side2Desc   String   @default("خصومات لفترة محدودة")
-  side2Image  String   @default("https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80")
-  side2Link   String   @default("/offers")
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default("hero-section")
+  title      String   @default("العناية تبدأ من هنا")
+  subtitle   String   @default("مجموعة مختارة من أفضل منتجات العناية والشعر")
+  image      String   @default("https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80")
+  buttonText String   @default("تسوق الآن")
+  buttonLink String   @default("/products")
+  side1Title String   @default("الأقسام")
+  side1Desc  String   @default("تصفح كافة التصنيفات")
+  side1Image String   @default("https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80")
+  side1Link  String   @default("/categories")
+  side2Title String   @default("عروض حصرية")
+  side2Desc  String   @default("خصومات لفترة محدودة")
+  side2Image String   @default("https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80")
+  side2Link  String   @default("/offers")
+  updatedAt  DateTime @updatedAt
 }

@@ -152,10 +152,10 @@ app.get('/api/products/:id', async (req, res) => {
 });
 
 app.post('/api/products', async (req, res) => {
-  const { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId } = req.body;
+  const { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId, sizesPrices, productSpecs, keyInfo, certifications, overview, warnings, disclaimer, directions, ingredients, supplementFacts } = req.body;
   try {
     const product = await prisma.product.create({
-      data: { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId }
+      data: { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId, sizesPrices, productSpecs, keyInfo, certifications, overview, warnings, disclaimer, directions, ingredients, supplementFacts }
     });
     res.status(201).json(product);
   } catch (error) {
@@ -165,11 +165,11 @@ app.post('/api/products', async (req, res) => {
 });
 
 app.patch('/api/products/:id', async (req, res) => {
-  const { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId } = req.body;
+  const { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId, sizesPrices, productSpecs, keyInfo, certifications, overview, warnings, disclaimer, directions, ingredients, supplementFacts } = req.body;
   try {
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId }
+      data: { title, desc, features, price, oldPrice, discountType, discountValue, image, images, sizes, tag, seoKeywords, seoDesc, categoryId, brandId, sizesPrices, productSpecs, keyInfo, certifications, overview, warnings, disclaimer, directions, ingredients, supplementFacts }
     });
     res.json(product);
   } catch (error) {
