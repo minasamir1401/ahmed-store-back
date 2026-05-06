@@ -21,7 +21,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // ── Multer Configuration ──────────────────────────────────────
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+    cb(null, path.join(__dirname, 'uploads'));
   },
   filename: (req, file, cb) => {
     cb(null, Date.now() + path.extname(file.originalname));
@@ -332,6 +332,15 @@ app.patch('/api/hero', async (req, res) => {
     console.error('Error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ── Error Handling Middleware ─────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('Unhandled Error:', err);
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `Multer Error: ${err.message}` });
+  }
+  res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 app.listen(PORT, () => {
