@@ -416,7 +416,7 @@ app.get('/api/images/:id/thumb', async (req, res) => {
     }
     let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
     if (!allowedImageTypes.has(mimeType)) {
-      const hex = (image.thumbnailData || image.data).toString('hex', 0, 8);
+      const hex = Buffer.from(image.thumbnailData || image.data).toString('hex', 0, 8);
       for (const [mime, prefixes] of allowedImageTypes.entries()) {
         if (prefixes.some(p => hex.startsWith(p))) {
           mimeType = mime;
@@ -454,7 +454,7 @@ app.get('/api/images/:id', async (req, res) => {
     }
     let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
     if (!allowedImageTypes.has(mimeType)) {
-      const hex = image.data.toString('hex', 0, 8);
+      const hex = Buffer.from(image.data).toString('hex', 0, 8);
       for (const [mime, prefixes] of allowedImageTypes.entries()) {
         if (prefixes.some(p => hex.startsWith(p))) {
           mimeType = mime;
@@ -469,7 +469,7 @@ app.get('/api/images/:id', async (req, res) => {
     }
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Type', mimeType);
-    if (image.fileName) res.setHeader('Content-Disposition', `inline; filename="${image.fileName.replace(/"/g, '')}"`);
+    if (image.fileName) res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(image.fileName)}`);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     const buf = image.data;
     res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
