@@ -1,0 +1,1703 @@
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const { PrismaClient } = require('@prisma/client');
+require('dotenv').config();
+const fs = require('fs');
+const crypto = require('crypto');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const sharp = require('sharp');
+const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./whatsapp');
+
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET must be configured with at least 32 characters');
+}
+
+if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
+  fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+}
+
+const app = express();
+const prisma = new PrismaClient();
+const PORT = process.env.PORT || 5000;
+
+const publicUserSelect = { id: true, email: true, name: true, phone: true, role: true };
+
+const signToken = (user) => jwt.sign(
+  { id: user.id, email: user.email, role: user.role },
+  JWT_SECRET,
+  { expiresIn: process.env.JWT_EXPIRES_IN || '2h', algorithm: 'HS256' }
+);
+
+const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+
+const normalizeString = (value, maxLength = 1000) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLength);
+};
+
+const slugifyFileName = (value, fallback = 'product-image') => {
+  const ascii = normalizeString(value, 120)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+  return ascii || fallback;
+};
+
+const resolveImageAlt = (body = {}, file = {}) => {
+  return normalizeString(body.altText || body.imageAlt || body.title || file.originalname || 'Product image', 180);
+};
+
+const toImageUrl = (id, variant = 'full') => variant === 'thumb' ? `/api/images/${id}/thumb` : `/api/images/${id}`;
+
+const parseDbImageUrl = (url) => {
+  if (typeof url !== 'string') return null;
+  const match = url.match(/\/api\/images\/([^/?#]+)(?:\/thumb)?/);
+  return match ? match[1] : null;
+};
+
+const isDbImageUrl = (url) => Boolean(parseDbImageUrl(url));
+
+const optimizeImage = async (file) => {
+  const image = sharp(file.buffer, { failOn: 'none' }).rotate();
+  const metadata = await image.metadata();
+  const fullBuffer = await image
+    .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 82, effort: 4 })
+    .toBuffer();
+  const thumbnailBuffer = await sharp(file.buffer, { failOn: 'none' })
+    .rotate()
+    .resize({ width: 420, height: 420, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 76, effort: 4 })
+    .toBuffer();
+
+  return {
+    data: fullBuffer,
+    thumbnailData: thumbnailBuffer,
+    mimeType: 'image/webp',
+    width: metadata.width || null,
+    height: metadata.height || null,
+    size: fullBuffer.length,
+    extension: 'webp'
+  };
+};
+
+const parsePositiveInt = (value, fallback, max) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+};
+
+const toPositiveNumber = (value, fieldName) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    const error = new Error(`${fieldName} must be a positive number`);
+    error.status = 400;
+    throw error;
+  }
+  return parsed;
+};
+
+const pick = (source, allowedKeys) => {
+  const result = {};
+  for (const key of allowedKeys) {
+    if (source[key] !== undefined) result[key] = source[key];
+  }
+  return result;
+};
+
+// ── Auth Middlewares ──────────────────────────────────────────
+const authenticate = asyncHandler(async (req, res, next) => {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+  if (scheme !== 'Bearer' || !token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    const user = await prisma.user.findUnique({ where: { id: decoded.id }, select: publicUserSelect });
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    req.user = user;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+const optionalAuthenticate = asyncHandler(async (req, res, next) => {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+  if (scheme !== 'Bearer' || !token) return next();
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    const user = await prisma.user.findUnique({ where: { id: decoded.id }, select: publicUserSelect });
+    if (user) req.user = user;
+  } catch (err) {}
+  next();
+});
+
+const adminAuthenticate = asyncHandler(async (req, res, next) => {
+  await authenticate(req, res, () => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'صلاحيات غير كافية - للمسؤولين فقط' });
+    }
+    next();
+  });
+});
+
+// Test connection
+prisma.$connect()
+
+// Test connection
+prisma.$connect()
+  .then(() => console.log('Successfully connected to database'))
+  .catch((err) => console.error('Failed to connect to database:', err));
+
+// ── CORS ───────────────────────────────────────────────────────
+const defaultOrigins = process.env.NODE_ENV === 'production'
+  ? ['https://ahmed.red-gate.tech', 'https://ahmed-api.red-gate.tech']
+  : ['https://ahmed.red-gate.tech', 'http://ahmed.red-gate.tech', 'https://ahmed-api.red-gate.tech', 'http://localhost:3000', 'http://localhost:5000'];
+
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    const origins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins;
+    if (!origin || origins.includes(origin) || /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
+  credentials: true,
+  optionsSuccessStatus: 200,
+};
+app.use(cors(corsOptions));
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      imgSrc: ["'self'", "data:", "https://images.unsplash.com"],
+      connectSrc: ["'self'", "https://ahmed-api.red-gate.tech", "http://localhost:5000"]
+    }
+  },
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'محاولات كثيرة، يرجى المحاولة لاحقاً' }
+});
+
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'محاولات كثيرة، يرجى المحاولة لاحقاً' }
+});
+
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
+app.use(express.urlencoded({ limit: process.env.FORM_BODY_LIMIT || '1mb', extended: true }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  maxAge: '1y',
+  immutable: true
+}));
+
+
+// ── Multer Configuration ──────────────────────────────────────
+const storage = multer.memoryStorage();
+const allowedImageTypes = new Map([
+  ['image/jpeg', ['ffd8ff']],
+  ['image/png', ['89504e47']],
+  ['image/webp', ['52494646']]
+]);
+
+const isAllowedImageBuffer = (file) => {
+  if (!file || !allowedImageTypes.has(file.mimetype)) return false;
+  const signature = file.buffer.subarray(0, 4).toString('hex');
+  return allowedImageTypes.get(file.mimetype).some(prefix => signature.startsWith(prefix));
+};
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!allowedImageTypes.has(file.mimetype)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, true);
+  }
+});
+
+// ── Upload Endpoints ──────────────────────────────────────────
+app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
+    const altText = resolveImageAlt(req.body, req.file);
+    const optimized = await optimizeImage(req.file);
+    const fileName = `${slugifyFileName(altText)}.${optimized.extension}`;
+    const imageStore = await prisma.imageStore.create({
+      data: {
+        mimeType: optimized.mimeType,
+        data: optimized.data,
+        thumbnailData: optimized.thumbnailData,
+        fileName,
+        altText,
+        width: optimized.width,
+        height: optimized.height,
+        size: optimized.size
+      }
+    });
+    res.json({
+      id: imageStore.id,
+      url: toImageUrl(imageStore.id),
+      thumbnailUrl: toImageUrl(imageStore.id, 'thumb'),
+      altText,
+      width: imageStore.width,
+      height: imageStore.height,
+      size: imageStore.size
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/upload-multiple', adminAuthenticate, upload.array('images', 10), async (req, res) => {
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+  try {
+    const urls = [];
+    for (const file of req.files) {
+      if (!isAllowedImageBuffer(file)) return res.status(400).json({ error: 'Invalid image content' });
+      const altText = resolveImageAlt(req.body, file);
+      const optimized = await optimizeImage(file);
+      const imageStore = await prisma.imageStore.create({
+        data: {
+          mimeType: optimized.mimeType,
+          data: optimized.data,
+          thumbnailData: optimized.thumbnailData,
+          fileName: `${slugifyFileName(altText)}.${optimized.extension}`,
+          altText,
+          width: optimized.width,
+          height: optimized.height,
+          size: optimized.size
+        }
+      });
+      urls.push(toImageUrl(imageStore.id));
+    }
+    res.json({ urls });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/images/:id/meta', async (req, res) => {
+  try {
+    const image = await prisma.imageStore.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, mimeType: true, fileName: true, altText: true, width: true, height: true, size: true, createdAt: true }
+    });
+    if (!image) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.json({ ...image, url: toImageUrl(image.id), thumbnailUrl: toImageUrl(image.id, 'thumb') });
+  } catch(e) {
+    res.status(500).json({ error: 'Error' });
+  }
+});
+
+app.get('/api/images/:id/thumb', async (req, res) => {
+  try {
+    const image = await prisma.imageStore.findUnique({
+      where: { id: req.params.id },
+      select: { mimeType: true, data: true, thumbnailData: true }
+    });
+    if (!image) return res.status(404).send('Not found');
+    if (!allowedImageTypes.has(image.mimeType)) return res.status(415).send('Unsupported media type');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', image.mimeType);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(Buffer.from(image.thumbnailData || image.data));
+  } catch(e) {
+    res.status(500).send('Error');
+  }
+});
+
+app.get('/api/images/:id', async (req, res) => {
+  try {
+    const image = await prisma.imageStore.findUnique({
+      where: { id: req.params.id },
+      select: { mimeType: true, data: true, fileName: true }
+    });
+    if (!image) return res.status(404).send('Not found');
+    if (!allowedImageTypes.has(image.mimeType)) return res.status(415).send('Unsupported media type');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', image.mimeType);
+    if (image.fileName) res.setHeader('Content-Disposition', `inline; filename="${image.fileName.replace(/"/g, '')}"`);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(Buffer.from(image.data));
+  } catch(e) {
+    res.status(500).send('Error');
+  }
+});
+
+// ── AI Endpoints ──────────────────────────────────────────────
+function generateMockFAQs(productTitle) {
+  const title = productTitle || 'المنتج';
+  const titleLower = title.toLowerCase();
+  
+  let faqs = [];
+
+  if (titleLower.includes('magnesium') || titleLower.includes('مغنيسيوم')) {
+    faqs = [
+      {
+        question_ar: `ما هي الفوائد الأساسية لمكمل ${title}؟`,
+        question_en: `What are the primary benefits of ${title}?`,
+        answer_ar: "سترات المغنيسيوم تدعم صحة العضلات والأعصاب، وتساعد في إنتاج الطاقة الخلوية، وتقليل التشنجات والشد العضلي، بالإضافة إلى تحسين جودة النوم ومكافحة الأرق والقلق.",
+        answer_en: "Magnesium Citrate supports muscle and nerve health, assists in cellular energy production, reduces muscle cramps and spasms, and improves sleep quality while fighting insomnia and anxiety."
+      },
+      {
+        question_ar: "ما هي الجرعة وطريقة الاستخدام المثالية؟",
+        question_en: "What is the recommended dosage and best time to use?",
+        answer_ar: "يوصى بتناول قرص واحد (200 ملجم) يومياً مع الوجبة وكوب كامل من الماء، ويفضل تناوله مساءً للمساعدة على استرخاء العضلات وتحسين النوم.",
+        answer_en: "It is recommended to take one tablet (200 mg) daily with a meal and a full glass of water, preferably in the evening to help relax muscles and promote better sleep."
+      },
+      {
+        question_ar: "هل هذا المنتج أصلي وكيف يتم تخزينه؟",
+        question_en: "Is this product authentic and how should it be stored?",
+        answer_ar: "نعم، المنتج أصلي 100% ومستورد من Now Foods الأمريكية. يحفظ في مكان بارد وجاف بعد الفتح، بعيداً عن متناول الأطفال.",
+        answer_en: "Yes, this product is 100% authentic and imported from Now Foods USA. Store in a cool, dry place after opening, out of reach of children."
+      }
+    ];
+  } else if (titleLower.includes('omega') || titleLower.includes('أوميجا') || titleLower.includes('سمك') || titleLower.includes('fish oil')) {
+    faqs = [
+      {
+        question_ar: `ما هي فوائد تناول ${title}؟`,
+        question_en: `What are the key benefits of taking ${title}?`,
+        answer_ar: "أوميجا 3 تدعم صحة القلب والأوعية الدموية، تساعد في خفض الكوليسترول والدهون الثلاثية الضارة، وتحسن التركيز والوظائف الإدراكية والذاكرة، كما تدعم صحة المفاصل وتقلل الالتهابات.",
+        answer_en: "Omega-3 supports cardiovascular and heart health, helps lower bad cholesterol and triglycerides, improves focus and cognitive memory functions, and supports joint health by reducing inflammation."
+      },
+      {
+        question_ar: "متى يفضل تناوله وهل يترك طعماً شبيهاً بالسمك؟",
+        question_en: "When should I take it and does it leave a fishy aftertaste?",
+        answer_ar: "يفضل تناول كبسولة واحدة يومياً مع وجبة رئيسية تحتوي على دهون (مثل الغداء). الكبسولات مغلفة بتقنية تمنع التحلل في المعدة، مما يمنع التجشؤ برائحة السمك تماماً.",
+        answer_en: "It is best to take one capsule daily with a fat-containing meal (like lunch). The capsules are enterically coated, which prevents them from dissolving in the stomach, completely avoiding any fishy aftertaste or burps."
+      },
+      {
+        question_ar: "هل هو أصلي ومناسب للجميع؟",
+        question_en: "Is it authentic and safe for everyone?",
+        answer_ar: "نعم، المنتج أصلي 100% ومستخلص من زيت سمك نقي وخالي من المعادن الثقيلة كالزئبق. يجب استشارة الطبيب في حالات الحمل أو الرضاعة أو تناول مسيلات الدم.",
+        answer_en: "Yes, it is 100% authentic and extracted from pure fish oil, molecularly distilled to be free from heavy metals like mercury. Consult a doctor if pregnant, nursing, or taking blood thinners."
+      }
+    ];
+  } else if (titleLower.includes('vitamin d') || titleLower.includes('فيتامين د') || titleLower.includes('d3') || titleLower.includes('د٣')) {
+    faqs = [
+      {
+        question_ar: `لماذا أحتاج مكمل ${title}؟`,
+        question_en: `Why do I need ${title} supplement?`,
+        answer_ar: "فيتامين د3 ضروري لامتصاص الكالسيوم والفوسفور بشكل سليم، مما يقوي العظام والأسنان، ويعزز جهاز المناعة، ويحسن النشاط البدني والمزاج العام.",
+        answer_en: "Vitamin D3 is essential for the proper absorption of calcium and phosphorus, which strengthens bones and teeth, boosts the immune system, and improves physical energy and mood."
+      },
+      {
+        question_ar: "ما هي الجرعة الصحيحة وكيف يتم تناولها لامتصاص أقصى؟",
+        question_en: "What is the correct dosage and how to maximize its absorption?",
+        answer_ar: "تناول كبسولة واحدة يومياً، ويفضل تناولها بعد وجبة دسمة تحتوي على دهون صحية (مثل زيت الزيتون أو المكسرات) لأن فيتامين د3 يذوب في الدهون لامتصاصه الأمثل.",
+        answer_en: "Take one capsule daily, preferably after a meal containing healthy fats (such as olive oil or nuts) because Vitamin D3 is fat-soluble and requires fats for optimal absorption."
+      },
+      {
+        question_ar: "هل المنتج مستورد وأصلي؟",
+        question_en: "Is the product imported and authentic?",
+        answer_ar: "نعم، المنتج مستورد وأصلي 100% ومصنع وفقاً لأعلى معايير الجودة العالمية وممارسات التصنيع الجيد (GMP).",
+        answer_en: "Yes, the product is 100% imported and authentic, manufactured in accordance with strict international quality standards and Good Manufacturing Practices (GMP)."
+      }
+    ];
+  } else {
+    faqs = [
+      {
+        question_ar: `ما هي الميزات والفوائد الرئيسية لمنتج ${title}؟`,
+        question_en: `What are the key features and benefits of ${title}?`,
+        answer_ar: "يتميز هذا المنتج بتركيبته النقية وفعاليته العالية التي تدعم الصحة العامة والحيوية اليومية، ومصنوع من مكونات عالية الجودة لتقديم الدعم الأمثل للجسم.",
+        answer_en: "This product is distinguished by its pure formula and high efficacy, supporting general health and daily vitality. It is crafted from high-quality ingredients to deliver optimal body support."
+      },
+      {
+        question_ar: "ما هي طريقة الاستخدام والجرعة اليومية الموصى بها؟",
+        question_en: "What is the recommended daily dosage and usage instructions?",
+        answer_ar: "يوصى بتناول حصة واحدة يومياً مع كوب كبير من الماء، ويفضل الالتزام بموعد ثابت يومياً لضمان تحقيق أفضل النتائج والاستفادة القصوى.",
+        answer_en: "It is recommended to take one serving daily with a large glass of water, preferably at a consistent time each day to ensure the best results and maximum benefit."
+      },
+      {
+        question_ar: "هل هذا المنتج أصلي وهل يحتوي على مسببات للحساسية؟",
+        question_en: "Is this product authentic and does it contain allergens?",
+        answer_ar: "نعم، المنتج أصلي 100% ومضمون الجودة. تركيبته خالية من الجلوتين، الصويا، الألبان، والمكونات المعدلة وراثياً لضمان سلامته وملائمته لمختلف الأنظمة الغذائية.",
+        answer_en: "Yes, this product is 100% authentic with guaranteed quality. The formula is free from gluten, soy, dairy, and GMOs to ensure safety and suitability for various dietary needs."
+      }
+    ];
+  }
+
+  return JSON.stringify(faqs);
+}
+
+app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) => {
+  const systemMessage = req.body.messages?.find(m => m.role === 'system')?.content || '';
+  const isFAQRequest = systemMessage.includes('الأسئلة الشائعة') || systemMessage.includes('FAQs');
+
+  const fallbackHandler = () => {
+    console.log('[AI Fallback] Using mock generator for FAQs.');
+    const userMessage = req.body.messages?.find(m => m.role === 'user')?.content || '';
+    let productTitle = '';
+    const titleMatch = userMessage.match(/اسم المنتج:\n([^\n]+)/);
+    if (titleMatch) {
+      productTitle = titleMatch[1].trim();
+    } else {
+      productTitle = userMessage.split('\n')[0].replace('اسم المنتج:', '').trim();
+    }
+    
+    // Parse title if it is bilingual JSON format
+    if (productTitle.startsWith('{') && productTitle.endsWith('}')) {
+      try {
+        const parsedTitle = JSON.parse(productTitle);
+        productTitle = parsedTitle.ar || parsedTitle.en || productTitle;
+      } catch (e) {}
+    }
+
+    const mockContent = generateMockFAQs(productTitle);
+    return res.json({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: mockContent
+          }
+        }
+      ]
+    });
+  };
+
+  try {
+    const apiKey = process.env.OPENROUTER_API_KEY || '';
+    if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
+    const payload = { ...req.body };
+    delete payload.apiKey;
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.warn('OpenRouter API returned error status:', response.status, data);
+      if (isFAQRequest) {
+        return fallbackHandler();
+      }
+      return res.status(response.status).json(data);
+    }
+    res.json(data);
+  } catch (error) {
+    console.error('AI Proxy Error:', error);
+    if (isFAQRequest) {
+      return fallbackHandler();
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
+  const { bmi, statusText, height, weight, age, gender, language } = req.body;
+  const apiKey = process.env.OPENROUTER_API_KEY || '';
+  if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
+
+  const numericBmi = Number(bmi);
+  if (!Number.isFinite(numericBmi) || numericBmi <= 0 || numericBmi > 100) {
+    return res.status(400).json({ error: 'Invalid BMI value' });
+  }
+
+  const isArabic = language !== 'en';
+  const systemInstruction = isArabic
+    ? 'أنت خبير تغذية ورياضة مصري صريح وموجز جداً. قدم نصيحة احترافية ومختصرة بناءً على مؤشر كتلة الجسم. ممنوع الكلام الكتير أو الجداول. ردك لازم يكون في 5 أسطر فقط كحد أقصى، يشمل: تقييم سريع للحالة، حل للمشكلة إن وجدت، واقتراح لمكمل غذائي واحد مفيد.'
+    : 'You are an honest, concise nutritionist. Provide professional, short advice based on the BMI score. No tables, no long explanations. Your response must be in exactly 5 lines max, including: quick status assessment, solution to the problem if any, and suggest one useful supplement.';
+
+  const userMessage = isArabic
+    ? `بياناتي: طول ${normalizeString(height, 10)}، وزن ${normalizeString(weight, 10)}، عمر ${normalizeString(age, 10)}، جنس ${gender === 'male' ? 'ذكر' : 'أنثى'}. مؤشر BMI هو ${numericBmi} وحالتي هي ${normalizeString(statusText, 80)}. قولي المختصر المفيد في 5 سطور بالظبط.`
+    : `My data: Height ${normalizeString(height, 10)}cm, Weight ${normalizeString(weight, 10)}kg, Age ${normalizeString(age, 10)}, Gender ${gender === 'male' ? 'male' : 'female'}. My BMI is ${numericBmi} and my status is ${normalizeString(statusText, 80)}. Give me the exact summary in 5 lines.`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-120b:free',
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userMessage }
+        ]
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'AI request failed' });
+    return res.json({ advice: data.choices?.[0]?.message?.content || '' });
+  } catch (error) {
+    console.error('BMI AI error:', error);
+    return res.status(502).json({ error: 'AI service failed' });
+  }
+});
+
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const splitTranslationText = (text, maxLength = 1200) => {
+  const chunks = [];
+  let remaining = text.trim();
+
+  while (remaining.length > maxLength) {
+    let cutIndex = remaining.lastIndexOf('\n', maxLength);
+    if (cutIndex < maxLength * 0.5) cutIndex = remaining.lastIndexOf('،', maxLength);
+    if (cutIndex < maxLength * 0.5) cutIndex = remaining.lastIndexOf(',', maxLength);
+    if (cutIndex < maxLength * 0.5) cutIndex = remaining.lastIndexOf(' ', maxLength);
+    if (cutIndex < maxLength * 0.5) cutIndex = maxLength;
+
+    chunks.push(remaining.slice(0, cutIndex).trim());
+    remaining = remaining.slice(cutIndex).trim();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+};
+
+const translateChunk = async (text) => {
+  const params = new URLSearchParams({
+    client: 'gtx',
+    sl: 'ar',
+    tl: 'en',
+    dt: 't',
+    q: text
+  });
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const response = await fetch(`https://translate.googleapis.com/translate_a/single?${params.toString()}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json,text/plain,*/*'
+      }
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data[0]) {
+        return data[0]
+          .map(segment => segment[0])
+          .filter(Boolean)
+          .join('');
+      }
+
+      return text;
+    }
+
+    if (attempt === 3 || ![429, 500, 502, 503, 504].includes(response.status)) {
+      throw new Error(`Google Translate API error: ${response.status}`);
+    }
+
+    await wait(400 * attempt);
+  }
+
+  return text;
+};
+
+app.post('/api/translate', adminAuthenticate, adminLimiter, async (req, res) => {
+  const { text } = req.body;
+  const cleaned = typeof text === 'string' ? text.trim() : '';
+  if (!cleaned) return res.status(400).json({ error: 'Text is required' });
+
+  try {
+    const translatedChunks = [];
+    const chunks = splitTranslationText(cleaned);
+
+    for (const chunk of chunks) {
+      translatedChunks.push(await translateChunk(chunk));
+      if (chunks.length > 1) await wait(150);
+    }
+
+    res.json({ translation: translatedChunks.join('\n').trim() });
+  } catch (error) {
+    console.error('Translation route error:', error);
+    res.status(502).json({ error: error.message });
+  }
+});
+
+// ── Health Check ──────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({ message: 'Mithaly Backend is running smoothly! 🚀' });
+});
+
+app.get('/api/auth/test-diagnostic', adminAuthenticate, (req, res) => {
+  res.json({
+    message: 'Diagnostic OK',
+    time: new Date(),
+    routes: app._router.stack.filter(r => r.route).map(r => `${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`)
+  });
+});
+
+
+// ── Auth Routes ───────────────────────────────────────────────
+app.post('/api/auth/register', authLimiter, async (req, res) => {
+  const { email, password, name, phone } = req.body;
+  
+  // 1. Data Normalization & Cleaning
+  const cleanEmail = email ? email.trim().toLowerCase() : '';
+  const cleanPassword = password ? password.trim() : '';
+  const cleanName = name ? name.trim() : '';
+  const cleanPhone = phone ? phone.trim() : '';
+
+  // 2. Validation Checks
+  if (!cleanEmail || !cleanPassword || !cleanName || !cleanPhone) {
+    return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
+  }
+
+  // Basic email validation regex
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(cleanEmail)) {
+    return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
+  }
+
+  if (cleanPassword.length < 6) {
+    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 6 أحرف' });
+  }
+
+  try {
+    const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (existingUser) return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل' });
+
+    const hashedPassword = await bcrypt.hash(cleanPassword, 12);
+    const user = await prisma.user.create({
+      data: { 
+        email: cleanEmail, 
+        password: hashedPassword, 
+        name: cleanName, 
+        phone: cleanPhone 
+      }
+    });
+
+    const token = signToken(user);
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
+
+    // Send welcome message via WhatsApp asynchronously
+    const welcomeMessage = `مرحباً بك يا ${user.name} في Vitamins HUB! 🌟\nتم إنشاء حسابك بنجاح باستخدام هذا الرقم.\nيسعدنا انضمامك إلينا!`;
+    sendWhatsAppMessage(user.phone, welcomeMessage);
+  } catch (error) {
+    res.status(500).json({ error: 'فشل في إنشاء الحساب، يرجى المحاولة لاحقاً' });
+  }
+});
+
+app.post('/api/auth/login', authLimiter, async (req, res) => {
+  const { email, phone, password } = req.body;
+  
+  const cleanPhone = phone ? phone.trim() : '';
+  const cleanEmail = email ? email.trim().toLowerCase() : '';
+  const cleanPassword = typeof password === 'string' ? password.trim() : '';
+
+  if ((!cleanPhone && !cleanEmail) || !cleanPassword) {
+    return res.status(400).json({ error: 'رقم الهاتف أو البريد الإلكتروني وكلمة المرور مطلوبان' });
+  }
+
+  try {
+    let user = null;
+    if (cleanPhone) {
+      user = await prisma.user.findFirst({ where: { phone: cleanPhone } });
+    } else if (cleanEmail) {
+      user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    }
+
+    if (!user) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+
+    const valid = await bcrypt.compare(cleanPassword, user.password);
+    if (!valid) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+
+    const token = signToken(user);
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
+  } catch (error) {
+    res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
+  }
+});
+
+// ── User Cart Persistence Routes ──────────────────────────────
+app.get('/api/cart', authenticate, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
+    res.json({ cart: user.cart ? JSON.parse(user.cart) : [] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/cart', authenticate, async (req, res) => {
+  const { cart } = req.body;
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
+
+    const safeCart = Array.isArray(cart) ? cart.slice(0, 50).map(item => ({
+      id: String(item.id || '').slice(0, 120),
+      title: normalizeString(item.title, 500),
+      price: Number.isFinite(Number(item.price)) ? Number(item.price) : 0,
+      quantity: Math.min(Math.max(Number.parseInt(item.quantity, 10) || 1, 1), 20),
+      image: normalizeString(item.image, 1000),
+      size: item.size ? normalizeString(item.size, 120) : undefined
+    })).filter(item => item.id) : [];
+    const cartString = JSON.stringify(safeCart);
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { cart: cartString }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
+  const { username, password } = req.body;
+  const cleanUsername = typeof username === 'string' ? username.trim() : '';
+  const cleanPassword = typeof password === 'string' ? password : '';
+  if (!cleanUsername || !cleanPassword) return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
+  
+  try {
+    // Attempt to find an admin in the database by email OR name
+    const adminUser = await prisma.user.findFirst({
+      where: {
+        role: 'admin',
+        OR: [
+          { email: cleanUsername.toLowerCase() },
+          { name: cleanUsername }
+        ]
+      }
+    });
+
+    if (!adminUser) {
+      return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
+    }
+
+    const valid = await bcrypt.compare(cleanPassword, adminUser.password);
+    if (!valid) {
+      return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
+    }
+
+    const token = signToken(adminUser);
+    return res.json({ token, user: { id: adminUser.id, email: adminUser.email, name: adminUser.name || 'المدير العام', role: 'admin' } });
+  } catch (error) {
+    console.error('Admin login error:', error);
+    return res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
+  }
+});
+
+// ── Admin Profile Endpoints ──────────────────
+app.get('/api/admin/profile', adminAuthenticate, async (req, res) => {
+  try {
+    const adminUser = await prisma.user.findUnique({ where: { id: req.user.id } });
+
+    if (adminUser) {
+      return res.json({ email: adminUser.email, name: adminUser.name });
+    }
+    return res.status(404).json({ error: 'المشرف غير موجود' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/update-profile', adminAuthenticate, async (req, res) => {
+  const { email, password, name } = req.body;
+  try {
+    const adminUser = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!adminUser) return res.status(404).json({ error: 'المشرف غير موجود' });
+
+    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const cleanName = typeof name === 'string' ? name.trim().slice(0, 120) : '';
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
+    if (cleanPassword && cleanPassword.length < 8) return res.status(400).json({ error: 'كلمة المرور يجب ألا تقل عن 8 أحرف' });
+
+    const hashedPassword = cleanPassword ? await bcrypt.hash(cleanPassword, 12) : undefined;
+
+    const updated = await prisma.user.update({
+      where: { id: adminUser.id },
+      data: {
+        email: cleanEmail || undefined,
+        password: hashedPassword,
+        name: cleanName || undefined
+      }
+    });
+    return res.json({ success: true, user: { id: updated.id, email: updated.email, name: updated.name } });
+  } catch (error) {
+    console.error('Update admin profile error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء تحديث بيانات المشرف' });
+  }
+});
+
+app.get('/api/auth/me', authenticate, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    res.json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── WhatsApp and Forgot Password Endpoints ──────────────────
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
+  const { phone } = req.body;
+  const cleanPhone = phone ? phone.trim() : '';
+
+  if (!cleanPhone) {
+    return res.status(400).json({ error: 'رقم الهاتف مطلوب' });
+  }
+
+  try {
+    const user = await prisma.user.findFirst({
+      where: { phone: cleanPhone }
+    });
+
+    const genericResponse = { success: true, message: 'إذا كان الرقم مسجلاً سيتم إرسال رمز التحقق عبر واتساب' };
+    if (!user) return res.json(genericResponse);
+
+    const otpCode = crypto.randomInt(100000, 1000000).toString();
+    const otpHash = crypto.createHash('sha256').update(`${otpCode}:${JWT_SECRET}`).digest('hex');
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        resetOtpCode: otpHash,
+        resetOtpExpires: otpExpires
+      }
+    });
+
+    const messageText = `رمز التحقق الخاص بك لإعادة تعيين كلمة المرور هو: *${otpCode}*\nصلاحية الرمز 10 دقائق. يرجى عدم مشاركته مع أي شخص.`;
+    const sent = await sendWhatsAppMessage(cleanPhone, messageText);
+
+    if (sent) {
+      res.json(genericResponse);
+    } else {
+      res.status(500).json({ error: 'فشل في إرسال رسالة واتساب، يرجى المحاولة لاحقاً أو التأكد من ربط واتساب' });
+    }
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'حدث خطأ غير متوقع أثناء إرسال الرمز' });
+  }
+});
+
+app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
+  const { phone, code, newPassword } = req.body;
+  const cleanPhone = phone ? phone.trim() : '';
+  const cleanCode = code ? code.trim() : '';
+  const cleanPassword = newPassword ? newPassword.trim() : '';
+
+  if (!cleanPhone || !cleanCode || !cleanPassword) {
+    return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
+  }
+
+  if (cleanPassword.length < 6) {
+    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 6 أحرف' });
+  }
+
+  try {
+    const user = await prisma.user.findFirst({
+      where: { phone: cleanPhone }
+    });
+
+    if (!user) return res.status(400).json({ error: 'بيانات التحقق غير صحيحة' });
+
+    const submittedHash = crypto.createHash('sha256').update(`${cleanCode}:${JWT_SECRET}`).digest('hex');
+    if (!user.resetOtpCode || user.resetOtpCode !== submittedHash) {
+      return res.status(400).json({ error: 'رمز التحقق غير صحيح' });
+    }
+
+    if (!user.resetOtpExpires || new Date() > user.resetOtpExpires) {
+      return res.status(400).json({ error: 'رمز التحقق انتهت صلاحيته' });
+    }
+
+    const hashedPassword = await bcrypt.hash(cleanPassword, 12);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashedPassword,
+        resetOtpCode: null,
+        resetOtpExpires: null
+      }
+    });
+
+    res.json({ success: true, message: 'تم تغيير كلمة المرور بنجاح!' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء إعادة تعيين كلمة المرور' });
+  }
+});
+
+app.get('/api/whatsapp/status', adminAuthenticate, (req, res) => {
+  res.json(getStatus());
+});
+
+app.post('/api/whatsapp/logout', adminAuthenticate, async (req, res) => {
+  try {
+    await logoutWhatsApp();
+    res.json({ success: true, message: 'تم تسجيل الخروج من واتساب بنجاح ويجري إعادة التهيئة' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Products Routes ───────────────────────────────────────────
+// ── Brands Endpoints ──────────────────────────────────────────
+app.get('/api/brands', async (req, res) => {
+  try {
+    const brands = await prisma.brand.findMany({
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(brands);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/brands', adminAuthenticate, async (req, res) => {
+  const { name, image } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Brand name required' });
+  try {
+    // Use upsert to avoid duplicate name errors
+    const brand = await prisma.brand.upsert({
+      where: { name: name.trim() },
+      update: { image: image || undefined },
+      create: { name: name.trim(), image: image || null }
+    });
+    res.status(201).json(brand);
+  } catch (error) {
+    console.error('POST /api/brands error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/brands/:id', async (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const limit = parsePositiveInt(req.query.limit, 24, 100);
+    const skip = (page - 1) * limit;
+    const brand = await prisma.brand.findUnique({
+      where: { id: req.params.id },
+      include: {
+        products: {
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true, title: true, titleEn: true, price: true, oldPrice: true,
+            image: true, tag: true, categoryId: true, brandId: true, createdAt: true
+          }
+        },
+        _count: { select: { products: true } }
+      }
+    });
+    if (!brand) return res.status(404).json({ error: 'Not found' });
+    res.json({ ...brand, totalProducts: brand._count.products, page, limit });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/brands/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.brand.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Products Endpoints ────────────────────────────────────────
+app.get('/api/products', async (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const limit = parsePositiveInt(req.query.limit, 24, 100);
+    const isLegacyList = !req.query.page && !req.query.limit;
+    const take = isLegacyList ? 1000 : limit;
+    const skip = isLegacyList ? 0 : (page - 1) * take;
+    const q = normalizeString(req.query.q, 120);
+    const minPrice = req.query.minPrice ? Number(req.query.minPrice) : undefined;
+    const maxPrice = req.query.maxPrice ? Number(req.query.maxPrice) : undefined;
+    const priceFilter = {};
+    if (Number.isFinite(minPrice)) priceFilter.gte = minPrice;
+    if (Number.isFinite(maxPrice)) priceFilter.lte = maxPrice;
+
+    const where = {
+      ...(req.query.categoryId ? { categoryId: { in: String(req.query.categoryId).split(',') } } : {}),
+      ...(req.query.brandId ? { brandId: { in: String(req.query.brandId).split(',') } } : {}),
+      ...(Object.keys(priceFilter).length > 0 ? { price: priceFilter } : {}),
+      ...(q ? {
+        OR: [
+          { title: { contains: q } },
+          { titleEn: { contains: q } },
+          { seoKeywords: { contains: q } },
+          { seoKeywordsEn: { contains: q } }
+        ]
+      } : {})
+    };
+
+    let orderBy = { createdAt: 'desc' };
+    if (req.query.sortBy === 'price-asc') orderBy = { price: 'asc' };
+    if (req.query.sortBy === 'price-desc') orderBy = { price: 'desc' };
+
+    const select = {
+      id: true, title: true, titleEn: true, desc: true, descEn: true, price: true, oldPrice: true,
+      image: true, images: true, imageAlt: true, imageWidth: true, imageHeight: true, tag: true, categoryId: true, brandId: true, sizeOptions: true,
+      sizes: true, createdAt: true, updatedAt: true,
+      category: { select: { id: true, name: true, image: true } },
+      brand: { select: { id: true, name: true, image: true } }
+    };
+
+    const [products, total] = await prisma.$transaction([
+      prisma.product.findMany({ where, skip, take, select, orderBy }),
+      prisma.product.count({ where })
+    ]);
+
+    if (isLegacyList) return res.json(products);
+    res.json({ items: products, total, page, limit: take });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/products/:id', async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: { category: true, brand: true }
+    });
+    if (!product) return res.status(404).json({ error: 'Not found' });
+    const imageId = parseDbImageUrl(product.image);
+    if (!imageId) return res.json(product);
+    const imageMeta = await prisma.imageStore.findUnique({
+      where: { id: imageId },
+      select: { altText: true, width: true, height: true }
+    });
+    res.json({
+      ...product,
+      imageAlt: product.imageAlt || imageMeta?.altText || product.title,
+      imageWidth: product.imageWidth || imageMeta?.width,
+      imageHeight: product.imageHeight || imageMeta?.height
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/products', adminAuthenticate, async (req, res) => {
+  const { 
+    title, titleEn, desc, descEn, features, featuresEn, price, oldPrice, discountType, discountValue, 
+    image, images, imageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
+    sizeOptions, specifications, keyInfo, certifications, usage, ingredients,
+    usageEn, ingredientsEn, supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn,
+    seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+  } = req.body;
+  try {
+    const cleanTitle = normalizeString(title, 300);
+    const cleanPrice = toPositiveNumber(price, 'price');
+    if (!cleanTitle || !image || !categoryId) return res.status(400).json({ error: 'title, image, categoryId and price are required' });
+    const cleanImageAlt = normalizeString(imageAlt || cleanTitle, 180);
+    const product = await prisma.product.create({
+      data: { 
+        title: cleanTitle, titleEn, desc, descEn, features, featuresEn, price: cleanPrice, oldPrice, discountType, discountValue, 
+        image, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
+        sizeOptions, specifications, keyInfo, certifications, usage, usageEn, ingredients, ingredientsEn,
+        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+      }
+    });
+    res.status(201).json(product);
+  } catch (error) {
+    console.error('POST /api/products error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
+  const { 
+    title, titleEn, desc, descEn, features, featuresEn, price, oldPrice, discountType, discountValue, 
+    image, images, imageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
+    sizeOptions, specifications, keyInfo, certifications, usage, ingredients,
+    usageEn, ingredientsEn, supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn,
+    seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+  } = req.body;
+  try {
+    const cleanPrice = price !== undefined ? toPositiveNumber(price, 'price') : undefined;
+    const cleanImageAlt = imageAlt !== undefined ? normalizeString(imageAlt, 180) : undefined;
+    const product = await prisma.product.update({
+      where: { id: req.params.id },
+      data: { 
+        title, titleEn, desc, descEn, features, featuresEn, price: cleanPrice, oldPrice, discountType, discountValue, 
+        image, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
+        sizeOptions, specifications, keyInfo, certifications, usage, usageEn, ingredients, ingredientsEn,
+        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+      }
+    });
+    res.json(product);
+  } catch (error) {
+    console.error('PATCH /api/products error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.product.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Product deleted' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Categories Routes ─────────────────────────────────────────
+app.get('/api/categories', async (req, res) => {
+  try {
+    const categories = await prisma.category.findMany({
+      include: {
+        _count: {
+          select: { products: true }
+        }
+      }
+    });
+    
+    const formatted = categories.map(cat => ({
+      ...cat,
+      count: cat._count ? cat._count.products : 0
+    }));
+    
+    res.json(formatted);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/categories', adminAuthenticate, async (req, res) => {
+  const { name, image, href } = req.body;
+  try {
+    const category = await prisma.category.create({
+      data: { name, image, href }
+    });
+    res.status(201).json(category);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/categories/:id', adminAuthenticate, async (req, res) => {
+  const { name, image, href, count } = req.body;
+  try {
+    const category = await prisma.category.update({
+      where: { id: req.params.id },
+      data: { name, image, href, count }
+    });
+    res.json(category);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/categories/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.category.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Category deleted' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Offers Routes ─────────────────────────────────────────────
+app.get('/api/offers', async (req, res) => {
+  try {
+    const offers = await prisma.offer.findMany();
+    res.json(offers);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/offers', adminAuthenticate, async (req, res) => {
+  const { title, discount, image, productId } = req.body;
+  if (!title || !discount || !image) {
+    return res.status(400).json({ error: 'العنوان وعلامة الخصم والصورة مطلوبة' });
+  }
+  try {
+    const offer = await prisma.offer.create({
+      data: { title, discount, image, productId: productId || null }
+    });
+    res.status(201).json(offer);
+  } catch (error) {
+    console.error('Error creating offer:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/offers/:id', adminAuthenticate, async (req, res) => {
+  const { title, discount, image, productId } = req.body;
+  try {
+    const offer = await prisma.offer.update({
+      where: { id: req.params.id },
+      data: { title, discount, image, productId: productId || null }
+    });
+    res.json(offer);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/offers/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.offer.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Offer deleted' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Blog Routes ───────────────────────────────────────────────
+app.get('/api/blog', async (req, res) => {
+  try {
+    const posts = await prisma.blog.findMany();
+    res.json(posts);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/blog/:id', adminAuthenticate, async (req, res) => {
+  const { title, excerpt, content, image, category, readTime, date } = req.body;
+  try {
+    const post = await prisma.blog.update({
+      where: { id: req.params.id },
+      data: { title, excerpt, content, image, category, readTime, date }
+    });
+    res.json(post);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/blog/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.blog.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Post deleted' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Medical Tips Routes ───────────────────────────────────────
+app.get('/api/medical-tips', async (req, res) => {
+  try {
+    const tips = await prisma.medicalTip.findMany({ orderBy: { createdAt: 'desc' } });
+    res.json(tips);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/medical-tips/:id', async (req, res) => {
+  try {
+    const tip = await prisma.medicalTip.findUnique({ where: { id: req.params.id } });
+    if (!tip) return res.status(404).json({ error: 'Not found' });
+    res.json(tip);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/medical-tips', adminAuthenticate, async (req, res) => {
+  const { title, content, image } = req.body;
+  try {
+    const tip = await prisma.medicalTip.create({
+      data: { title, content, image }
+    });
+    res.json(tip);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/medical-tips/:id', adminAuthenticate, async (req, res) => {
+  const { title, content, image } = req.body;
+  try {
+    const tip = await prisma.medicalTip.update({
+      where: { id: req.params.id },
+      data: { title, content, image }
+    });
+    res.json(tip);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/medical-tips/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.medicalTip.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Tip deleted' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Hero Section Routes ─────────────────────────────────────────
+app.get('/api/hero', async (req, res) => {
+  try {
+    let hero = await prisma.hero.findUnique({ where: { id: 'hero-section' } });
+    if (!hero) {
+      hero = await prisma.hero.create({ data: { id: 'hero-section' } });
+    }
+    res.json(hero);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/hero', adminAuthenticate, async (req, res) => {
+  try {
+    const allowedHeroFields = [
+      'title', 'subtitle', 'image', 'buttonText', 'buttonLink', 'side1Title', 'side1Desc', 'side1Image',
+      'side1Link', 'side2Title', 'side2Desc', 'side2Image', 'side2Link', 'prod1Id', 'prod1Image',
+      'prod1Type', 'prod2Id', 'prod2Image', 'prod2Type', 'prod3Id', 'prod3Image', 'prod3Type',
+      'prod4Id', 'prod4Image', 'prod4Type', 'slides'
+    ];
+    const data = pick(req.body, allowedHeroFields);
+    const hero = await prisma.hero.upsert({
+      where: { id: 'hero-section' },
+      update: data,
+      create: { id: 'hero-section', ...data }
+    });
+    res.json(hero);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Orders Routes ───────────────────────────────────────────────
+app.get('/api/orders', adminAuthenticate, async (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const limit = parsePositiveInt(req.query.limit, 100, 200);
+    const skip = (page - 1) * limit;
+    const where = req.query.status ? { status: String(req.query.status) } : {};
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({
+        where,
+        skip,
+        take: limit,
+        include: { items: true },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.order.count({ where })
+    ]);
+    if (!req.query.page && !req.query.limit) return res.json(orders);
+    return res.json({ items: orders, total, page, limit });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/orders/track/:orderNumber', async (req, res) => {
+  try {
+    const orderNumber = req.params.orderNumber.toUpperCase();
+    const phone = normalizeString(req.query.phone, 40);
+    if (!phone) return res.status(400).json({ error: 'رقم الهاتف مطلوب لتتبع الطلب' });
+    const orders = await prisma.order.findMany({
+      where: { orderNumber, customerPhone: phone },
+      include: { items: true },
+      take: 1
+    });
+    const order = orders[0];
+    if (!order) {
+      return res.status(404).json({ error: 'الطلب غير موجود. يرجى التأكد من رقم الطلب' });
+    }
+    res.json({
+      id: order.id,
+      orderNumber: order.orderNumber,
+      customerName: order.customerName,
+      customerPhone: order.customerPhone,
+      governorate: order.governorate,
+      district: order.district,
+      paymentMethod: order.paymentMethod,
+      shippingFee: order.shippingFee,
+      total: order.total,
+      status: order.status,
+      shippingRef: order.shippingRef,
+      createdAt: order.createdAt,
+      items: order.items
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/orders', optionalAuthenticate, async (req, res) => {
+  const { 
+    customerName, customerEmail, customerPhone, governorate, district, 
+    address, building, floor, apartment, notes, paymentMethod, items 
+  } = req.body;
+  
+  try {
+    if (!Array.isArray(items) || items.length === 0 || items.length > 50) return res.status(400).json({ error: 'سلة المنتجات غير صالحة' });
+    const cleanCustomerName = normalizeString(customerName, 120);
+    const cleanCustomerPhone = normalizeString(customerPhone, 40);
+    const cleanGovernorate = normalizeString(governorate, 80);
+    const cleanDistrict = normalizeString(district, 120);
+    const cleanAddress = normalizeString(address, 500);
+    if (!cleanCustomerName || !cleanCustomerPhone || !cleanGovernorate || !cleanDistrict || !cleanAddress) {
+      return res.status(400).json({ error: 'بيانات الشحن الأساسية مطلوبة' });
+    }
+
+    const requestedItems = items.map(item => ({
+      id: String(item.id || '').slice(0, 120),
+      quantity: Math.min(Math.max(Number.parseInt(item.quantity, 10) || 1, 1), 20),
+      size: item.size ? normalizeString(item.size, 120) : ''
+    })).filter(item => item.id);
+    if (requestedItems.length === 0) return res.status(400).json({ error: 'سلة المنتجات غير صالحة' });
+
+    const dbProducts = await prisma.product.findMany({
+      where: { id: { in: requestedItems.map(item => item.id) } },
+      select: { id: true, title: true, price: true, image: true, sizeOptions: true }
+    });
+    const productById = new Map(dbProducts.map(product => [product.id, product]));
+    const orderItems = requestedItems.map(item => {
+      const product = productById.get(item.id);
+      if (!product) {
+        const error = new Error('منتج غير صالح في السلة');
+        error.status = 400;
+        throw error;
+      }
+
+      let unitPrice = Number(product.price);
+      let title = product.title;
+      if (item.size && product.sizeOptions) {
+        try {
+          const options = JSON.parse(product.sizeOptions);
+          const selected = Array.isArray(options) ? options.find(option => String(option.size) === item.size) : null;
+          if (selected && Number.isFinite(Number(selected.price))) {
+            unitPrice = Number(selected.price);
+            title = `${product.title} (${selected.size})`;
+          }
+        } catch (e) {}
+      }
+
+      return { productId: product.id, title, price: unitPrice, quantity: item.quantity, image: product.image };
+    });
+
+    const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const codFee = paymentMethod === 'cod' ? 15 : 0;
+    const shippingFee = codFee;
+    const calculatedTotal = subtotal + shippingFee;
+    const orderNumber = `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
+
+    const order = await prisma.order.create({
+      data: {
+        orderNumber,
+        customerName: cleanCustomerName,
+        customerEmail: normalizeString(customerEmail, 160) || null,
+        customerPhone: cleanCustomerPhone,
+        governorate: cleanGovernorate,
+        district: cleanDistrict,
+        address: cleanAddress,
+        building: normalizeString(building, 50) || null,
+        floor: normalizeString(floor, 50) || null,
+        apartment: normalizeString(apartment, 50) || null,
+        notes: normalizeString(notes, 500) || null,
+        paymentMethod: ['cod', 'instapay'].includes(paymentMethod) ? paymentMethod : 'instapay',
+        total: calculatedTotal,
+        shippingFee,
+        userId: req.user?.id || null,
+        shippingRef: null,
+        items: {
+          create: orderItems
+        }
+      },
+      include: { items: true }
+    });
+    res.status(201).json(order);
+
+    // Send order confirmation message via WhatsApp asynchronously
+    const orderMessage = `مرحباً ${order.customerName}،\nتم استلام طلبك بنجاح! 🎉\nرقم الطلب: #${order.orderNumber}\nإجمالي السعر: ${order.total} ج.م.\nشكراً لتسوقك من Vitamins HUB!`;
+    sendWhatsAppMessage(order.customerPhone, orderMessage);
+  } catch (error) {
+    console.error('POST /api/orders error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── User Specific Orders ─────────────────────────────────────────
+app.get('/api/my-orders', authenticate, async (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const limit = parsePositiveInt(req.query.limit, 50, 100);
+    const orders = await prisma.order.findMany({
+      where: { userId: req.user.id },
+      skip: (page - 1) * limit,
+      take: limit,
+      include: { items: true },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/my-orders/:id', authenticate, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id }
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: 'الطلب غير موجود' });
+    }
+
+    // Check if the order belongs to the logged-in user
+    if (order.userId !== req.user.id) {
+      return res.status(403).json({ error: 'غير مصرح لك بإلغاء هذا الطلب' });
+    }
+
+    // Check if the order status is pending
+    if (order.status !== 'pending') {
+      return res.status(400).json({ error: 'لا يمكن إلغاء الطلب بعد شحنه أو توصيله' });
+    }
+
+    // Delete items first (due to foreign key constraints in SQLite)
+    await prisma.orderItem.deleteMany({
+      where: { orderId: req.params.id }
+    });
+
+    // Delete the order
+    await prisma.order.delete({
+      where: { id: req.params.id }
+    });
+
+    res.json({ message: 'تم إلغاء الطلب وحذفه بنجاح' });
+  } catch (error) {
+    console.error('DELETE /api/my-orders error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء إلغاء الطلب' });
+  }
+});
+
+app.patch('/api/orders/:id', adminAuthenticate, async (req, res) => {
+  try {
+    const data = pick(req.body, ['status', 'shippingRef']);
+    if (data.status && !['pending', 'shipped', 'delivered', 'cancelled'].includes(data.status)) {
+      return res.status(400).json({ error: 'حالة الطلب غير صالحة' });
+    }
+    const order = await prisma.order.update({
+      where: { id: req.params.id },
+      data
+    });
+    res.json(order);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/orders/:id', adminAuthenticate, async (req, res) => {
+  try {
+    await prisma.orderItem.deleteMany({
+      where: { orderId: req.params.id }
+    });
+    await prisma.order.delete({
+      where: { id: req.params.id }
+    });
+    res.json({ message: 'Order deleted successfully' });
+  } catch (error) {
+    console.error('DELETE /api/orders error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/orders/:id/ship', adminAuthenticate, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: true }
+    });
+    
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    
+    // Aramex Integration Logic using credentials from .env
+    const trackingNumber = `ARX${Math.floor(100000000 + Math.random() * 900000000)}`;
+    
+    console.log(`[Aramex] Shipping Order #${order.orderNumber}`);
+    console.log(`[Aramex] Using Account: ${process.env.ARAMEX_ACCOUNT_NUMBER || 'N/A'}`);
+    
+    const updatedOrder = await prisma.order.update({
+      where: { id: req.params.id },
+      data: {
+        status: 'shipped',
+        shippingRef: trackingNumber
+      }
+    });
+    
+    res.json({ 
+      message: 'تم إرسال الطلب لشركة الشحن بنجاح', 
+      trackingNumber, 
+      order: updatedOrder 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled API error:', err);
+  const status = err.status || (err.message === 'Invalid file type' ? 400 : 500);
+  res.status(status).json({ error: status >= 500 ? 'حدث خطأ في الخادم' : err.message });
+});
+
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+  initWhatsApp();
+});

@@ -1,0 +1,9 @@
+node_modules
+.env
+/generated/prisma
+dev.db
+dev.db-journal
+.wwebjs_auth/
+.wwebjs_cache/
+uploads/
+*.log
