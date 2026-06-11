@@ -250,24 +250,48 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
 const storage = multer.memoryStorage();
 const allowedImageTypes = new Map([
   ['image/jpeg', ['ffd8ff']],
+  ['image/jpg', ['ffd8ff']],
+  ['image/pjpeg', ['ffd8ff']],
   ['image/png', ['89504e47']],
-  ['image/webp', ['52494646']]
+  ['image/x-png', ['89504e47']],
+  ['image/webp', ['52494646']],
+  ['image/avif', ['6674797061766966']]
 ]);
 
 const isAllowedImageBuffer = (file) => {
-  if (!file || !allowedImageTypes.has(file.mimetype)) return false;
-  const signature = file.buffer.subarray(0, 4).toString('hex');
-  return allowedImageTypes.get(file.mimetype).some(prefix => signature.startsWith(prefix));
+  if (!file || !file.buffer) return false;
+  
+  // Try to match by signature first (most reliable)
+  const signature = file.buffer.subarray(0, 16).toString('hex').toLowerCase();
+  
+  // Check if it's AVIF (contains ftypavif at offset 4, which is index 8 in hex string)
+  if (signature.substring(8, 24) === '6674797061766966' || signature.substring(8, 24) === '6674797061766973') {
+    return true;
+  }
+  
+  for (const prefixes of allowedImageTypes.values()) {
+    if (prefixes.some(prefix => signature.startsWith(prefix))) {
+      return true;
+    }
+  }
+  
+  const mime = file.mimetype ? file.mimetype.toLowerCase() : '';
+  if (allowedImageTypes.has(mime)) return true;
+  return false;
 };
 
 const upload = multer({ 
   storage,
-  limits: { fileSize: 3 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!allowedImageTypes.has(file.mimetype)) {
-      return cb(new Error('Invalid file type'));
+    const mime = file.mimetype ? file.mimetype.toLowerCase() : '';
+    const ext = file.originalname ? path.extname(file.originalname).toLowerCase() : '';
+    const isAllowedExt = ['.jpg', '.jpeg', '.png', '.webp', '.jfif', '.avif'].includes(ext);
+    if (allowedImageTypes.has(mime) || isAllowedExt) {
+      return cb(null, true);
     }
-    cb(null, true);
+    console.warn(`[Upload Rejected] MIME: "${file.mimetype}", Ext: "${ext}", Name: "${file.originalname}"`);
+    return cb(new Error(`Invalid file type: ${file.mimetype || 'unknown'}`));
   }
 });
 
