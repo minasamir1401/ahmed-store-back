@@ -101,10 +101,20 @@ const isDbImageUrl = (url) => Boolean(parseDbImageUrl(url));
 
 const optimizeImage = async (file) => {
   const extension = path.extname(file.originalname).replace('.', '') || 'jpg';
+  
+  let detectedMime = file.mimetype;
+  const hex = file.buffer.toString('hex', 0, 8);
+  for (const [mime, prefixes] of allowedImageTypes.entries()) {
+    if (prefixes.some(p => hex.startsWith(p))) {
+      detectedMime = mime;
+      break;
+    }
+  }
+
   return {
     data: file.buffer,
     thumbnailData: null, // Let it fallback to full image for speed
-    mimeType: file.mimetype,
+    mimeType: detectedMime,
     width: null,
     height: null,
     size: file.size,
@@ -404,7 +414,17 @@ app.get('/api/images/:id/thumb', async (req, res) => {
       res.setHeader('Cache-Control', 'public, max-age=60');
       return res.send(PLACEHOLDER_SVG);
     }
-    const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    if (!allowedImageTypes.has(mimeType)) {
+      const hex = (image.thumbnailData || image.data).toString('hex', 0, 8);
+      for (const [mime, prefixes] of allowedImageTypes.entries()) {
+        if (prefixes.some(p => hex.startsWith(p))) {
+          mimeType = mime;
+          break;
+        }
+      }
+    }
+    
     if (!allowedImageTypes.has(mimeType)) {
       res.setHeader('Content-Type', 'image/svg+xml');
       return res.send(PLACEHOLDER_SVG);
@@ -432,7 +452,17 @@ app.get('/api/images/:id', async (req, res) => {
       res.setHeader('Cache-Control', 'public, max-age=60');
       return res.send(PLACEHOLDER_SVG);
     }
-    const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    if (!allowedImageTypes.has(mimeType)) {
+      const hex = image.data.toString('hex', 0, 8);
+      for (const [mime, prefixes] of allowedImageTypes.entries()) {
+        if (prefixes.some(p => hex.startsWith(p))) {
+          mimeType = mime;
+          break;
+        }
+      }
+    }
+    
     if (!allowedImageTypes.has(mimeType)) {
       res.setHeader('Content-Type', 'image/svg+xml');
       return res.send(PLACEHOLDER_SVG);
