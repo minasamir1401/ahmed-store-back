@@ -32,12 +32,41 @@ const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
 
 const publicUserSelect = { id: true, email: true, name: true, phone: true, role: true };
+const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
 
 const signToken = (user, expiresIn = process.env.JWT_EXPIRES_IN || '2h') => jwt.sign(
   { id: user.id, email: user.email, role: user.role },
   JWT_SECRET,
   { expiresIn, algorithm: 'HS256' }
 );
+
+const verifyGoogleIdToken = async (credential) => {
+  const googleClientId = process.env.GOOGLE_CLIENT_ID || '1058870754225-pfs6eoup1ba9k22fuq90vdndhkq5oejh.apps.googleusercontent.com';
+  if (!googleClientId) {
+    const error = new Error('Google sign-in is not configured');
+    error.status = 503;
+    throw error;
+  }
+
+  const response = await fetch(`${GOOGLE_TOKENINFO_URL}?id_token=${encodeURIComponent(credential)}`);
+  if (!response.ok) {
+    const error = new Error('Invalid Google credential');
+    error.status = 401;
+    throw error;
+  }
+
+  const payload = await response.json();
+  if (payload.aud !== googleClientId || payload.email_verified !== 'true' || !payload.email) {
+    const error = new Error('Invalid Google account');
+    error.status = 401;
+    throw error;
+  }
+
+  return {
+    email: normalizeString(payload.email, 254).toLowerCase(),
+    name: normalizeString(payload.name || payload.email, 120)
+  };
+};
 
 const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
@@ -715,6 +744,10 @@ app.get('/', (req, res) => {
   res.json({ message: 'Mithaly Backend is running smoothly! 🚀' });
 });
 
+app.get('/api/auth/google-config', authLimiter, (req, res) => {
+  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '1058870754225-pfs6eoup1ba9k22fuq90vdndhkq5oejh.apps.googleusercontent.com' });
+});
+
 app.get('/api/auth/test-diagnostic', adminAuthenticate, (req, res) => {
   res.json({
     message: 'Diagnostic OK',
@@ -802,6 +835,48 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
   } catch (error) {
     res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
+  }
+});
+
+app.post('/api/auth/google', authLimiter, async (req, res) => {
+  const { credential } = req.body;
+  const cleanCredential = typeof credential === 'string' ? credential.trim() : '';
+
+  if (!cleanCredential) {
+    return res.status(400).json({ error: 'بيانات حساب جوجل مطلوبة' });
+  }
+
+  try {
+    const googleUser = await verifyGoogleIdToken(cleanCredential);
+    let user = await prisma.user.findUnique({ where: { email: googleUser.email } });
+
+    if (!user) {
+      const randomPassword = crypto.randomBytes(32).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 12);
+      user = await prisma.user.create({
+        data: {
+          email: googleUser.email,
+          password: hashedPassword,
+          name: googleUser.name
+        }
+      });
+    } else if (!user.name && googleUser.name) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { name: googleUser.name }
+      });
+    }
+
+    const token = signToken(user);
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
+  } catch (error) {
+    const status = error.status || 500;
+    const message = status === 503
+      ? 'تسجيل الدخول بجوجل غير مفعل حالياً'
+      : status === 401
+        ? 'تعذر التحقق من حساب جوجل'
+        : 'حدث خطأ أثناء تسجيل الدخول بجوجل';
+    res.status(status).json({ error: message });
   }
 });
 
