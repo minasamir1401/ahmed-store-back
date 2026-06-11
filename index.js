@@ -33,10 +33,10 @@ const PORT = process.env.PORT || 5000;
 
 const publicUserSelect = { id: true, email: true, name: true, phone: true, role: true };
 
-const signToken = (user) => jwt.sign(
+const signToken = (user, expiresIn = process.env.JWT_EXPIRES_IN || '2h') => jwt.sign(
   { id: user.id, email: user.email, role: user.role },
   JWT_SECRET,
-  { expiresIn: process.env.JWT_EXPIRES_IN || '2h', algorithm: 'HS256' }
+  { expiresIn, algorithm: 'HS256' }
 );
 
 const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -846,7 +846,7 @@ app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
     }
 
-    const token = signToken(adminUser);
+    const token = signToken(adminUser, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
     return res.json({ token, user: { id: adminUser.id, email: adminUser.email, name: adminUser.name || 'المدير العام', role: 'admin' } });
   } catch (error) {
     console.error('Admin login error:', error);
