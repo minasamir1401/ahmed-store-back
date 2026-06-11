@@ -8,9 +8,9 @@ echo "Waiting for database to be ready and running migrations..."
 MAX_RETRIES=20
 RETRY_COUNT=0
 
-until npx prisma migrate deploy || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+until npx prisma db push || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
   RETRY_COUNT=$((RETRY_COUNT + 1))
-  echo "Database connection not ready yet. Retrying in 5 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
+  echo "Database connection not ready yet or schema push failed. Retrying in 5 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
   sleep 5
 done
 
