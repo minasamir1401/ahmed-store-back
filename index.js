@@ -361,18 +361,24 @@ app.get('/api/images/:id/meta', async (req, res) => {
   }
 });
 
+// Reusable placeholder SVG for missing/broken images
+const PLACEHOLDER_SVG = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><rect width="400" height="400" fill="#f1f5f9"/><rect x="140" y="130" width="120" height="100" rx="8" fill="#cbd5e1"/><circle cx="170" cy="155" r="12" fill="#94a3b8"/><polygon points="140,230 185,175 215,205 240,185 260,230" fill="#94a3b8"/><text x="200" y="270" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#94a3b8">صورة غير متاحة</text></svg>`);
+
 app.get('/api/images/:id/thumb', async (req, res) => {
   try {
     const image = await prisma.imageStore.findUnique({
       where: { id: req.params.id },
       select: { mimeType: true, data: true, thumbnailData: true }
     });
-    if (!image) return res.status(404).send('Not found');
-    // Normalize mimeType: handle 'image/jpg' -> 'image/jpeg' etc.
+    if (!image) {
+      res.setHeader('Content-Type', 'image/svg+xml');
+      res.setHeader('Cache-Control', 'public, max-age=60');
+      return res.send(PLACEHOLDER_SVG);
+    }
     const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
     if (!allowedImageTypes.has(mimeType)) {
-      console.error(`[ImageThumb] Unsupported mimeType: "${image.mimeType}" for id: ${req.params.id}`);
-      return res.status(415).send('Unsupported media type');
+      res.setHeader('Content-Type', 'image/svg+xml');
+      return res.send(PLACEHOLDER_SVG);
     }
     const buf = image.thumbnailData || image.data;
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -380,8 +386,9 @@ app.get('/api/images/:id/thumb', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
   } catch(e) {
-    console.error(`[ImageThumb] Error fetching thumbnail id=${req.params.id}:`, e);
-    res.status(500).send('Error');
+    console.error(`[ImageThumb] Error id=${req.params.id}:`, e);
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(PLACEHOLDER_SVG);
   }
 });
 
@@ -391,12 +398,15 @@ app.get('/api/images/:id', async (req, res) => {
       where: { id: req.params.id },
       select: { mimeType: true, data: true, fileName: true }
     });
-    if (!image) return res.status(404).send('Not found');
-    // Normalize mimeType: handle 'image/jpg' -> 'image/jpeg' etc.
+    if (!image) {
+      res.setHeader('Content-Type', 'image/svg+xml');
+      res.setHeader('Cache-Control', 'public, max-age=60');
+      return res.send(PLACEHOLDER_SVG);
+    }
     const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
     if (!allowedImageTypes.has(mimeType)) {
-      console.error(`[Image] Unsupported mimeType: "${image.mimeType}" for id: ${req.params.id}`);
-      return res.status(415).send('Unsupported media type');
+      res.setHeader('Content-Type', 'image/svg+xml');
+      return res.send(PLACEHOLDER_SVG);
     }
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Type', mimeType);
@@ -405,8 +415,9 @@ app.get('/api/images/:id', async (req, res) => {
     const buf = image.data;
     res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
   } catch(e) {
-    console.error(`[Image] Error fetching id=${req.params.id}:`, e);
-    res.status(500).send('Error');
+    console.error(`[Image] Error id=${req.params.id}:`, e);
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(PLACEHOLDER_SVG);
   }
 });
 
@@ -1213,12 +1224,13 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
   try {
     const cleanTitle = normalizeString(title, 300);
     const cleanPrice = toPositiveNumber(price, 'price');
-    if (!cleanTitle || !image || !categoryId) return res.status(400).json({ error: 'title, image, categoryId and price are required' });
+    if (!cleanTitle || !categoryId) return res.status(400).json({ error: 'title, categoryId and price are required' });
+    const cleanImage = image || 'https://placehold.co/400x400?text=No+Image';
     const cleanImageAlt = normalizeString(imageAlt || cleanTitle, 180);
     const product = await prisma.product.create({
       data: { 
         title: cleanTitle, titleEn, desc, descEn, features, featuresEn, price: cleanPrice, oldPrice, discountType, discountValue, 
-        image, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
+        image: cleanImage, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
         sizeOptions, specifications, keyInfo, certifications, usage, usageEn, ingredients, ingredientsEn,
         supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
       }
