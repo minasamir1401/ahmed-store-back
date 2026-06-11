@@ -368,13 +368,19 @@ app.get('/api/images/:id/thumb', async (req, res) => {
       select: { mimeType: true, data: true, thumbnailData: true }
     });
     if (!image) return res.status(404).send('Not found');
-    if (!allowedImageTypes.has(image.mimeType)) return res.status(415).send('Unsupported media type');
+    // Normalize mimeType: handle 'image/jpg' -> 'image/jpeg' etc.
+    const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    if (!allowedImageTypes.has(mimeType)) {
+      console.error(`[ImageThumb] Unsupported mimeType: "${image.mimeType}" for id: ${req.params.id}`);
+      return res.status(415).send('Unsupported media type');
+    }
+    const buf = image.thumbnailData || image.data;
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Type', image.mimeType);
+    res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(image.thumbnailData || image.data);
+    res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
   } catch(e) {
-    console.error('Error fetching image thumbnail:', e);
+    console.error(`[ImageThumb] Error fetching thumbnail id=${req.params.id}:`, e);
     res.status(500).send('Error');
   }
 });
@@ -386,14 +392,20 @@ app.get('/api/images/:id', async (req, res) => {
       select: { mimeType: true, data: true, fileName: true }
     });
     if (!image) return res.status(404).send('Not found');
-    if (!allowedImageTypes.has(image.mimeType)) return res.status(415).send('Unsupported media type');
+    // Normalize mimeType: handle 'image/jpg' -> 'image/jpeg' etc.
+    const mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
+    if (!allowedImageTypes.has(mimeType)) {
+      console.error(`[Image] Unsupported mimeType: "${image.mimeType}" for id: ${req.params.id}`);
+      return res.status(415).send('Unsupported media type');
+    }
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Type', image.mimeType);
+    res.setHeader('Content-Type', mimeType);
     if (image.fileName) res.setHeader('Content-Disposition', `inline; filename="${image.fileName.replace(/"/g, '')}"`);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(image.data);
+    const buf = image.data;
+    res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
   } catch(e) {
-    console.error('Error fetching image:', e);
+    console.error(`[Image] Error fetching id=${req.params.id}:`, e);
     res.status(500).send('Error');
   }
 });

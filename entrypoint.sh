@@ -4,13 +4,13 @@ set -e
 # Create required runtime directories. Product images are stored in PostgreSQL.
 mkdir -p /tmp/.wwebjs_auth
 
-echo "Resetting database and pushing schema (force-reset)..."
+echo "Applying database schema migrations (safe - no data loss)..."
 MAX_RETRIES=20
 RETRY_COUNT=0
 
-until npx prisma db push --force-reset || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+until npx prisma db push || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
   RETRY_COUNT=$((RETRY_COUNT + 1))
-  echo "Database connection not ready yet or schema push failed. Retrying in 5 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
+  echo "Database not ready yet. Retrying in 5 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
   sleep 5
 done
 
@@ -19,6 +19,6 @@ if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
   exit 1
 fi
 
-echo "Database reset and schema pushed successfully ✅"
+echo "Database schema applied successfully ✅"
 
 exec "$@"
