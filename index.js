@@ -71,26 +71,15 @@ const parseDbImageUrl = (url) => {
 const isDbImageUrl = (url) => Boolean(parseDbImageUrl(url));
 
 const optimizeImage = async (file) => {
-  const image = sharp(file.buffer, { failOn: 'none' }).rotate();
-  const metadata = await image.metadata();
-  const fullBuffer = await image
-    .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 82, effort: 4 })
-    .toBuffer();
-  const thumbnailBuffer = await sharp(file.buffer, { failOn: 'none' })
-    .rotate()
-    .resize({ width: 420, height: 420, fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 76, effort: 4 })
-    .toBuffer();
-
+  const extension = path.extname(file.originalname).replace('.', '') || 'jpg';
   return {
-    data: fullBuffer,
-    thumbnailData: thumbnailBuffer,
-    mimeType: 'image/webp',
-    width: metadata.width || null,
-    height: metadata.height || null,
-    size: fullBuffer.length,
-    extension: 'webp'
+    data: file.buffer,
+    thumbnailData: null, // Let it fallback to full image for speed
+    mimeType: file.mimetype,
+    width: null,
+    height: null,
+    size: file.size,
+    extension: extension.toLowerCase()
   };
 };
 
