@@ -14,7 +14,7 @@ until npx prisma db push --force-reset || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
   sleep 5
 done
 
-if [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
   echo "❌ Error: Could not connect to the database after $MAX_RETRIES attempts. Exiting."
   exit 1
 fi
