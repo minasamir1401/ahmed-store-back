@@ -356,6 +356,7 @@ app.get('/api/images/:id/meta', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     res.json({ ...image, url: toImageUrl(image.id), thumbnailUrl: toImageUrl(image.id, 'thumb') });
   } catch(e) {
+    console.error('Error fetching image metadata:', e);
     res.status(500).json({ error: 'Error' });
   }
 });
@@ -371,8 +372,9 @@ app.get('/api/images/:id/thumb', async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Type', image.mimeType);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(Buffer.from(image.thumbnailData || image.data));
+    res.send(image.thumbnailData || image.data);
   } catch(e) {
+    console.error('Error fetching image thumbnail:', e);
     res.status(500).send('Error');
   }
 });
@@ -389,8 +391,9 @@ app.get('/api/images/:id', async (req, res) => {
     res.setHeader('Content-Type', image.mimeType);
     if (image.fileName) res.setHeader('Content-Disposition', `inline; filename="${image.fileName.replace(/"/g, '')}"`);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(Buffer.from(image.data));
+    res.send(image.data);
   } catch(e) {
+    console.error('Error fetching image:', e);
     res.status(500).send('Error');
   }
 });
