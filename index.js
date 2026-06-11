@@ -782,6 +782,43 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
   }
 });
 
+// ── Admin Login Route ─────────────────────────────────────────
+app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
+  const { username, email, phone, password } = req.body;
+
+  // username field can be either email or phone
+  const rawIdentifier = username || email || phone || '';
+  const cleanPassword = typeof password === 'string' ? password.trim() : '';
+
+  if (!rawIdentifier || !cleanPassword) {
+    return res.status(400).json({ error: 'اسم المستخدم وكلمة المرور مطلوبان' });
+  }
+
+  const isEmail = rawIdentifier.includes('@');
+  const cleanIdentifier = isEmail ? rawIdentifier.trim().toLowerCase() : rawIdentifier.trim();
+
+  try {
+    let user = null;
+    if (isEmail) {
+      user = await prisma.user.findUnique({ where: { email: cleanIdentifier } });
+    } else {
+      user = await prisma.user.findFirst({ where: { phone: cleanIdentifier } });
+    }
+
+    if (!user) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+    if (user.role !== 'admin') return res.status(403).json({ error: 'هذا الحساب ليس لديه صلاحيات المسؤول' });
+
+    const valid = await bcrypt.compare(cleanPassword, user.password);
+    if (!valid) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+
+    // Admin sessions last 7 days
+    const token = signToken(user, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
+  } catch (error) {
+    res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
+  }
+});
+
 // ── User Cart Persistence Routes ──────────────────────────────
 app.get('/api/cart', authenticate, async (req, res) => {
   try {
