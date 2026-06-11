@@ -159,7 +159,29 @@ const adminAuthenticate = asyncHandler(async (req, res, next) => {
 
 // Test connection
 prisma.$connect()
-  .then(() => console.log('Successfully connected to database'))
+  .then(async () => {
+    console.log('Successfully connected to database');
+    try {
+      const adminExists = await prisma.user.findFirst({ where: { role: 'admin' } });
+      if (!adminExists) {
+        console.log('No admin user found. Creating default admin...');
+        const bcrypt = require('bcryptjs');
+        const hashedPassword = await bcrypt.hash('admin123456', 12);
+        await prisma.user.create({
+          data: {
+            email: 'admin@mithaly.com',
+            password: hashedPassword,
+            name: 'المدير العام',
+            phone: '201000000000',
+            role: 'admin'
+          }
+        });
+        console.log('Default admin user created successfully ✅');
+      }
+    } catch (err) {
+      console.error('Error seeding default admin:', err);
+    }
+  })
   .catch((err) => console.error('Failed to connect to database:', err));
 
 // ── CORS ───────────────────────────────────────────────────────
