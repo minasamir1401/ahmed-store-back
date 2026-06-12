@@ -323,6 +323,19 @@ const upload = multer({
   }
 });
 
+const backupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB limit for backups
+  fileFilter: (req, file, cb) => {
+    const ext = file.originalname ? path.extname(file.originalname).toLowerCase() : '';
+    const mime = file.mimetype ? file.mimetype.toLowerCase() : '';
+    if (mime === 'application/zip' || mime === 'application/x-zip-compressed' || mime === 'application/octet-stream' || ext === '.zip') {
+      return cb(null, true);
+    }
+    console.warn(`[Backup Upload Rejected] MIME: "${file.mimetype}", Ext: "${ext}", Name: "${file.originalname}"`);
+    return cb(new Error(`Invalid file type for backup: ${file.mimetype || 'unknown'}. Only ZIP files are allowed.`));
+  }
+});
 // ── Upload Endpoints ──────────────────────────────────────────
 app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -855,11 +868,11 @@ const splitTranslationText = (text, maxLength = 1200) => {
   return chunks;
 };
 
-const translateChunk = async (text) => {
+const translateChunk = async (text, from = 'ar', to = 'en') => {
   const params = new URLSearchParams({
     client: 'gtx',
-    sl: 'ar',
-    tl: 'en',
+    sl: from,
+    tl: to,
     dt: 't',
     q: text
   });
@@ -895,7 +908,7 @@ const translateChunk = async (text) => {
 };
 
 app.post('/api/translate', adminAuthenticate, adminLimiter, async (req, res) => {
-  const { text } = req.body;
+  const { text, from = 'ar', to = 'en' } = req.body;
   const cleaned = typeof text === 'string' ? text.trim() : '';
   if (!cleaned) return res.status(400).json({ error: 'Text is required' });
 
@@ -904,7 +917,7 @@ app.post('/api/translate', adminAuthenticate, adminLimiter, async (req, res) => 
     const chunks = splitTranslationText(cleaned);
 
     for (const chunk of chunks) {
-      translatedChunks.push(await translateChunk(chunk));
+      translatedChunks.push(await translateChunk(chunk, from, to));
       if (chunks.length > 1) await wait(150);
     }
 
@@ -2112,7 +2125,7 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
   }
 });
 
-app.post('/api/admin/restore', adminAuthenticate, upload.single('backup'), async (req, res) => {
+app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No backup file uploaded' });
   try {
     const zip = new AdmZip(req.file.buffer);
@@ -2252,7 +2265,7 @@ app.post('/api/admin/restore', adminAuthenticate, upload.single('backup'), async
 app.use((err, req, res, next) => {
   console.error('Unhandled API error:', err);
   const status = err.status || (err.message === 'Invalid file type' ? 400 : 500);
-  res.status(status).json({ error: status >= 500 ? 'حدث خطأ في الخادم' : err.message });
+  res.status(status).json({ error: err.message || 'حدث خطأ في الخادم' });
 });
 
 
