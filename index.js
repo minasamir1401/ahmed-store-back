@@ -1284,16 +1284,13 @@ app.get('/api/products', async (req, res) => {
     if (req.query.sortBy === 'price-asc') orderBy = { price: 'asc' };
     if (req.query.sortBy === 'price-desc') orderBy = { price: 'desc' };
 
-    const select = {
-      id: true, title: true, titleEn: true, desc: true, descEn: true, price: true, oldPrice: true,
-      image: true, images: true, imageAlt: true, imageWidth: true, imageHeight: true, tag: true, categoryId: true, brandId: true, sizeOptions: true,
-      sizes: true, createdAt: true, updatedAt: true,
+    const include = {
       category: { select: { id: true, name: true, image: true } },
       brand: { select: { id: true, name: true, image: true } }
     };
 
     const [products, total] = await prisma.$transaction([
-      prisma.product.findMany({ where, skip, take, select, orderBy }),
+      prisma.product.findMany({ where, skip, take, include, orderBy }),
       prisma.product.count({ where })
     ]);
 
