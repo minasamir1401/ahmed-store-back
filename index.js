@@ -1319,14 +1319,14 @@ app.get('/api/brands', async (req, res) => {
 });
 
 app.post('/api/brands', adminAuthenticate, async (req, res) => {
-  const { name, image } = req.body;
+  const { name, nameEn, image } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Brand name required' });
   try {
     // Use upsert to avoid duplicate name errors
     const brand = await prisma.brand.upsert({
       where: { name: name.trim() },
-      update: { image: image || undefined },
-      create: { name: name.trim(), image: image || null }
+      update: { image: image || undefined, nameEn: nameEn || undefined },
+      create: { name: name.trim(), nameEn: nameEn || null, image: image || null }
     });
     res.status(201).json(brand);
   } catch (error) {
@@ -1535,10 +1535,10 @@ app.get('/api/categories', async (req, res) => {
 });
 
 app.post('/api/categories', adminAuthenticate, async (req, res) => {
-  const { name, image, href } = req.body;
+  const { name, nameEn, image, href } = req.body;
   try {
     const category = await prisma.category.create({
-      data: { name, image, href }
+      data: { name, nameEn, image, href }
     });
     res.status(201).json(category);
   } catch (error) {
@@ -1548,11 +1548,11 @@ app.post('/api/categories', adminAuthenticate, async (req, res) => {
 });
 
 app.patch('/api/categories/:id', adminAuthenticate, async (req, res) => {
-  const { name, image, href, count } = req.body;
+  const { name, nameEn, image, href, count } = req.body;
   try {
     const category = await prisma.category.update({
       where: { id: req.params.id },
-      data: { name, image, href, count }
+      data: { name, nameEn, image, href, count }
     });
     res.json(category);
   } catch (error) {
