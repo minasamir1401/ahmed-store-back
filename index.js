@@ -1073,7 +1073,7 @@ app.post('/api/auth/google', authLimiter, async (req, res) => {
 app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
   const { username, email, phone, password } = req.body;
 
-  // username field can be either email or phone
+  // username field can be either email, phone or name
   const rawIdentifier = username || email || phone || '';
   const cleanPassword = typeof password === 'string' ? password.trim() : '';
 
@@ -1081,27 +1081,30 @@ app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'اسم المستخدم وكلمة المرور مطلوبان' });
   }
 
-  const isEmail = rawIdentifier.includes('@');
-  const cleanIdentifier = isEmail ? rawIdentifier.trim().toLowerCase() : rawIdentifier.trim();
+  const cleanIdentifier = rawIdentifier.trim();
 
   try {
-    let user = null;
-    if (isEmail) {
-      user = await prisma.user.findUnique({ where: { email: cleanIdentifier } });
-    } else {
-      user = await prisma.user.findFirst({ where: { phone: cleanIdentifier } });
-    }
+    const adminUser = await prisma.user.findFirst({
+      where: {
+        role: 'admin',
+        OR: [
+          { email: cleanIdentifier.toLowerCase() },
+          { phone: cleanIdentifier },
+          { name: cleanIdentifier }
+        ]
+      }
+    });
 
-    if (!user) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
-    if (user.role !== 'admin') return res.status(403).json({ error: 'هذا الحساب ليس لديه صلاحيات المسؤول' });
+    if (!adminUser) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
 
-    const valid = await bcrypt.compare(cleanPassword, user.password);
+    const valid = await bcrypt.compare(cleanPassword, adminUser.password);
     if (!valid) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
 
     // Admin sessions last 7 days
-    const token = signToken(user, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
-    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
+    const token = signToken(adminUser, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
+    res.json({ token, user: { id: adminUser.id, email: adminUser.email, name: adminUser.name || 'المدير العام', role: 'admin' } });
   } catch (error) {
+    console.error('Admin login error:', error);
     res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
   }
 });
@@ -1143,40 +1146,7 @@ app.post('/api/cart', authenticate, async (req, res) => {
 });
 
 
-app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
-  const { username, password } = req.body;
-  const cleanUsername = typeof username === 'string' ? username.trim() : '';
-  const cleanPassword = typeof password === 'string' ? password : '';
-  if (!cleanUsername || !cleanPassword) return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
-  
-  try {
-    // Attempt to find an admin in the database by email OR name
-    const adminUser = await prisma.user.findFirst({
-      where: {
-        role: 'admin',
-        OR: [
-          { email: cleanUsername.toLowerCase() },
-          { name: cleanUsername }
-        ]
-      }
-    });
 
-    if (!adminUser) {
-      return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
-    }
-
-    const valid = await bcrypt.compare(cleanPassword, adminUser.password);
-    if (!valid) {
-      return res.status(401).json({ error: 'بيانات الدخول خاطئة' });
-    }
-
-    const token = signToken(adminUser, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
-    return res.json({ token, user: { id: adminUser.id, email: adminUser.email, name: adminUser.name || 'المدير العام', role: 'admin' } });
-  } catch (error) {
-    console.error('Admin login error:', error);
-    return res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
-  }
-});
 
 // ── Admin Profile Endpoints ──────────────────
 app.get('/api/admin/profile', adminAuthenticate, async (req, res) => {
