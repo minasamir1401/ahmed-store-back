@@ -603,6 +603,68 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     });
   };
 
+  // Support Google Gemini API directly with live Google Search grounding
+  const requestedModel = req.body.model || '';
+  const geminiKey = process.env.GEMINI_API_KEY || '';
+  
+  if (geminiKey && (requestedModel.includes('gemini') || !process.env.OPENROUTER_API_KEY)) {
+    try {
+      const messages = req.body.messages || [];
+      const userMsg = messages.find(m => m.role === 'user')?.content || '';
+      const sysMsg = messages.find(m => m.role === 'system')?.content || '';
+
+      const geminiPayload = {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: userMsg }]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json'
+        },
+        tools: [
+          {
+            googleSearch: {} // Enables Google Search Grounding for real-time web search!
+          }
+        ]
+      };
+
+      if (sysMsg) {
+        geminiPayload.systemInstruction = {
+          parts: [{ text: sysMsg }]
+        };
+      }
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(geminiPayload)
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        return res.json({
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: text
+              }
+            }
+          ]
+        });
+      } else {
+        console.warn('Gemini API direct call returned error status:', response.status);
+      }
+    } catch (err) {
+      console.warn('[Gemini direct call failed, trying OpenRouter fallback]', err);
+    }
+  }
+
   try {
     const apiKey = process.env.OPENROUTER_API_KEY || '';
     if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
@@ -648,7 +710,8 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
 app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
   const { bmi, statusText, height, weight, age, gender, language } = req.body;
   const apiKey = process.env.OPENROUTER_API_KEY || '';
-  if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
+  const geminiKey = process.env.GEMINI_API_KEY || '';
+  if (!apiKey && !geminiKey) return res.status(503).json({ error: 'AI service is not configured' });
 
   const numericBmi = Number(bmi);
   if (!Number.isFinite(numericBmi) || numericBmi <= 0 || numericBmi > 100) {
@@ -663,6 +726,26 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
   const userMessage = isArabic
     ? `بياناتي: طول ${normalizeString(height, 10)}، وزن ${normalizeString(weight, 10)}، عمر ${normalizeString(age, 10)}، جنس ${gender === 'male' ? 'ذكر' : 'أنثى'}. مؤشر BMI هو ${numericBmi} وحالتي هي ${normalizeString(statusText, 80)}. قولي المختصر المفيد في 5 سطور بالظبط.`
     : `My data: Height ${normalizeString(height, 10)}cm, Weight ${normalizeString(weight, 10)}kg, Age ${normalizeString(age, 10)}, Gender ${gender === 'male' ? 'male' : 'female'}. My BMI is ${numericBmi} and my status is ${normalizeString(statusText, 80)}. Give me the exact summary in 5 lines.`;
+
+  if (geminiKey && !apiKey) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] }
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        return res.json({ advice: text });
+      }
+    } catch (err) {
+      console.error('Gemini BMI error:', err);
+    }
+  }
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
