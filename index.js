@@ -330,27 +330,23 @@ app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, r
     if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
     const altText = resolveImageAlt(req.body, req.file);
     const optimized = await optimizeImage(req.file);
-    const fileName = `${slugifyFileName(altText)}.${optimized.extension}`;
-    const imageStore = await prisma.imageStore.create({
-      data: {
-        mimeType: optimized.mimeType,
-        data: optimized.data,
-        thumbnailData: optimized.thumbnailData,
-        fileName,
-        altText,
-        width: optimized.width,
-        height: optimized.height,
-        size: optimized.size
-      }
-    });
+    const uniqueSuffix = crypto.randomBytes(6).toString('hex');
+    const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
+    
+    // Save file to the uploads directory
+    const uploadPath = path.join(__dirname, 'uploads', fileName);
+    fs.writeFileSync(uploadPath, optimized.data);
+    
+    const imageUrl = `/uploads/${fileName}`;
+
     res.json({
-      id: imageStore.id,
-      url: toImageUrl(imageStore.id),
-      thumbnailUrl: toImageUrl(imageStore.id, 'thumb'),
+      id: uniqueSuffix,
+      url: imageUrl,
+      thumbnailUrl: imageUrl,
       altText,
-      width: imageStore.width,
-      height: imageStore.height,
-      size: imageStore.size
+      width: optimized.width,
+      height: optimized.height,
+      size: optimized.size
     });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -365,19 +361,14 @@ app.post('/api/upload-multiple', adminAuthenticate, upload.array('images', 10), 
       if (!isAllowedImageBuffer(file)) return res.status(400).json({ error: 'Invalid image content' });
       const altText = resolveImageAlt(req.body, file);
       const optimized = await optimizeImage(file);
-      const imageStore = await prisma.imageStore.create({
-        data: {
-          mimeType: optimized.mimeType,
-          data: optimized.data,
-          thumbnailData: optimized.thumbnailData,
-          fileName: `${slugifyFileName(altText)}.${optimized.extension}`,
-          altText,
-          width: optimized.width,
-          height: optimized.height,
-          size: optimized.size
-        }
-      });
-      urls.push(toImageUrl(imageStore.id));
+      const uniqueSuffix = crypto.randomBytes(6).toString('hex');
+      const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
+      
+      // Save file to the uploads directory
+      const uploadPath = path.join(__dirname, 'uploads', fileName);
+      fs.writeFileSync(uploadPath, optimized.data);
+      
+      urls.push(`/uploads/${fileName}`);
     }
     res.json({ urls });
   } catch(e) {
@@ -1899,6 +1890,153 @@ app.post('/api/orders/:id/ship', adminAuthenticate, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Backup & Restore Endpoints ────────────────────────────────
+const AdmZip = require('adm-zip');
+
+app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
+  try {
+    const zip = new AdmZip();
+
+    // Fetch all database tables
+    const dbData = {
+      user: await prisma.user.findMany(),
+      category: await prisma.category.findMany(),
+      brand: await prisma.brand.findMany(),
+      product: await prisma.product.findMany(),
+      offer: await prisma.offer.findMany(),
+      blog: await prisma.blog.findMany(),
+      hero: await prisma.hero.findMany(),
+      order: await prisma.order.findMany(),
+      orderItem: await prisma.orderItem.findMany(),
+      imageStore: await prisma.imageStore.findMany(),
+      medicalTip: await prisma.medicalTip.findMany()
+    };
+
+    // Add database.json to zip
+    zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
+
+    // Add uploads directory to zip
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (fs.existsSync(uploadsDir)) {
+      const files = fs.readdirSync(uploadsDir);
+      for (const file of files) {
+        const filePath = path.join(uploadsDir, file);
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) {
+          zip.addLocalFile(filePath, 'uploads');
+        }
+      }
+    }
+
+    const zipBuffer = zip.toBuffer();
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename=mithaly-backup.zip');
+    res.send(zipBuffer);
+  } catch (error) {
+    console.error('Backup error:', error);
+    res.status(500).json({ error: 'Failed to create backup: ' + error.message });
+  }
+});
+
+app.post('/api/admin/restore', adminAuthenticate, upload.single('backup'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No backup file uploaded' });
+  try {
+    const zip = new AdmZip(req.file.buffer);
+    const databaseEntry = zip.getEntry('database.json');
+    if (!databaseEntry) {
+      return res.status(400).json({ error: 'Invalid backup file: database.json is missing' });
+    }
+
+    const dbData = JSON.parse(zip.readAsText(databaseEntry));
+
+    // Extract uploads
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    const zipEntries = zip.getEntries();
+    for (const entry of zipEntries) {
+      if (entry.entryName.startsWith('uploads/') && !entry.isDirectory) {
+        const fileName = entry.name;
+        const targetPath = path.join(uploadsDir, fileName);
+        fs.writeFileSync(targetPath, entry.getData());
+      }
+    }
+
+    // Restore Database records inside a Transaction
+    await prisma.$transaction(async (tx) => {
+      // 1. Delete all tables in reverse dependency order
+      await tx.orderItem.deleteMany();
+      await tx.order.deleteMany();
+      await tx.product.deleteMany();
+      await tx.category.deleteMany();
+      await tx.brand.deleteMany();
+      await tx.offer.deleteMany();
+      await tx.blog.deleteMany();
+      await tx.hero.deleteMany();
+      await tx.medicalTip.deleteMany();
+      await tx.imageStore.deleteMany();
+      await tx.user.deleteMany();
+
+      // 2. Insert records in dependency order
+      if (dbData.user && dbData.user.length > 0) {
+        await tx.user.createMany({ data: dbData.user });
+      }
+      
+      if (dbData.category && dbData.category.length > 0) {
+        await tx.category.createMany({ data: dbData.category });
+      }
+
+      if (dbData.brand && dbData.brand.length > 0) {
+        await tx.brand.createMany({ data: dbData.brand });
+      }
+
+      if (dbData.product && dbData.product.length > 0) {
+        await tx.product.createMany({ data: dbData.product });
+      }
+
+      if (dbData.order && dbData.order.length > 0) {
+        await tx.order.createMany({ data: dbData.order });
+      }
+
+      if (dbData.orderItem && dbData.orderItem.length > 0) {
+        await tx.orderItem.createMany({ data: dbData.orderItem });
+      }
+
+      if (dbData.offer && dbData.offer.length > 0) {
+        await tx.offer.createMany({ data: dbData.offer });
+      }
+
+      if (dbData.blog && dbData.blog.length > 0) {
+        await tx.blog.createMany({ data: dbData.blog });
+      }
+
+      if (dbData.hero && dbData.hero.length > 0) {
+        await tx.hero.createMany({ data: dbData.hero });
+      }
+
+      if (dbData.medicalTip && dbData.medicalTip.length > 0) {
+        await tx.medicalTip.createMany({ data: dbData.medicalTip });
+      }
+
+      if (dbData.imageStore && dbData.imageStore.length > 0) {
+        const imageStoresToInsert = dbData.imageStore.map(item => ({
+          ...item,
+          data: item.data ? Buffer.from(item.data.data || item.data) : undefined,
+          thumbnailData: item.thumbnailData ? Buffer.from(item.thumbnailData.data || item.thumbnailData) : undefined
+        }));
+        await tx.imageStore.createMany({ data: imageStoresToInsert });
+      }
+    });
+
+    res.json({ message: 'Backup restored successfully' });
+  } catch (error) {
+    console.error('Restore error:', error);
+    res.status(500).json({ error: 'Failed to restore backup: ' + error.message });
   }
 });
 
