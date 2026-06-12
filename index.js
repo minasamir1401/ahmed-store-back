@@ -1657,15 +1657,16 @@ app.delete('/api/blog/:id', adminAuthenticate, async (req, res) => {
   }
 });
 
-const translate = require('google-translate-api-x');
-
 // ── Translation Route ─────────────────────────────────────────
 app.post('/api/translate', adminAuthenticate, async (req, res) => {
   const { text, from = 'ar', to = 'en' } = req.body;
   if (!text) return res.status(400).json({ error: 'Text is required' });
   try {
-    const result = await translate(text, { from, to });
-    res.json({ text: result.text });
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
+    const translateRes = await fetch(url);
+    const data = await translateRes.json();
+    const translatedText = data[0].map((x) => x[0]).join('');
+    res.json({ text: translatedText });
   } catch (error) {
     console.error('Translation error:', error);
     res.status(500).json({ error: error.message || 'Translation failed' });
