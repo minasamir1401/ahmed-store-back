@@ -1171,7 +1171,8 @@ app.post('/api/admin/update-profile', adminAuthenticate, async (req, res) => {
     const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const cleanName = typeof name === 'string' ? name.trim().slice(0, 120) : '';
     const cleanPassword = typeof password === 'string' ? password.trim() : '';
-    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
+    // Allow any string to be used as username/email for the admin
+    // if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
     if (cleanPassword && cleanPassword.length < 8) return res.status(400).json({ error: 'كلمة المرور يجب ألا تقل عن 8 أحرف' });
 
     const hashedPassword = cleanPassword ? await bcrypt.hash(cleanPassword, 12) : undefined;
