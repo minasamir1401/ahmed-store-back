@@ -657,9 +657,6 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
             parts: [{ text: userMsg }]
           }
         ],
-        generationConfig: {
-          responseMimeType: 'application/json'
-        },
         tools: [
           {
             google_search: {} // Enables Google Search Grounding for real-time web search!
@@ -2048,20 +2045,46 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
   try {
     const zip = new AdmZip();
 
-    // Fetch all database tables
-    const dbData = {
-      user: await prisma.user.findMany(),
-      category: await prisma.category.findMany(),
-      brand: await prisma.brand.findMany(),
-      product: await prisma.product.findMany(),
-      offer: await prisma.offer.findMany(),
-      blog: await prisma.blog.findMany(),
-      hero: await prisma.hero.findMany(),
-      order: await prisma.order.findMany(),
-      orderItem: await prisma.orderItem.findMany(),
-      imageStore: await prisma.imageStore.findMany(),
-      medicalTip: await prisma.medicalTip.findMany()
-    };
+    // Check which tables are available and fetch their data
+    const tables = [
+      'user',
+      'category',
+      'brand',
+      'product',
+      'offer',
+      'blog',
+      'hero',
+      'order',
+      'orderItem',
+      'imageStore',
+      'medicalTip'
+    ];
+
+    const dbData = {};
+    for (const table of tables) {
+      try {
+        dbData[table] = await prisma[table].findMany();
+      } catch (err) {
+        console.warn(`Table "${table}" is not available. Skipping backup for this table. Error:`, err.message);
+        dbData[table] = [];
+      }
+    }
+
+    // Save imageStore binary files separately to prevent JSON size issues
+    if (dbData.imageStore && dbData.imageStore.length > 0) {
+      for (const row of dbData.imageStore) {
+        if (row.data) {
+          const dataBuffer = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data.data || row.data);
+          zip.addFile(`imageStore/${row.id}_data.bin`, dataBuffer);
+          delete row.data;
+        }
+        if (row.thumbnailData) {
+          const thumbBuffer = Buffer.isBuffer(row.thumbnailData) ? row.thumbnailData : Buffer.from(row.thumbnailData.data || row.thumbnailData);
+          zip.addFile(`imageStore/${row.id}_thumb.bin`, thumbBuffer);
+          delete row.thumbnailData;
+        }
+      }
+    }
 
     // Add database.json to zip
     zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
@@ -2115,67 +2138,105 @@ app.post('/api/admin/restore', adminAuthenticate, upload.single('backup'), async
       }
     }
 
+    // Check which tables are available in the database to avoid transaction crashes
+    const tables = [
+      'user',
+      'category',
+      'brand',
+      'product',
+      'offer',
+      'blog',
+      'hero',
+      'order',
+      'orderItem',
+      'imageStore',
+      'medicalTip'
+    ];
+
+    const availableTables = {};
+    for (const table of tables) {
+      try {
+        await prisma[table].findMany({ take: 1 });
+        availableTables[table] = true;
+      } catch (err) {
+        console.warn(`Table "${table}" is not available in the database. It will be skipped during restore.`);
+        availableTables[table] = false;
+      }
+    }
+
     // Restore Database records inside a Transaction
     await prisma.$transaction(async (tx) => {
-      // 1. Delete all tables in reverse dependency order
-      await tx.orderItem.deleteMany();
-      await tx.order.deleteMany();
-      await tx.product.deleteMany();
-      await tx.category.deleteMany();
-      await tx.brand.deleteMany();
-      await tx.offer.deleteMany();
-      await tx.blog.deleteMany();
-      await tx.hero.deleteMany();
-      await tx.medicalTip.deleteMany();
-      await tx.imageStore.deleteMany();
-      await tx.user.deleteMany();
+      // 1. Delete all tables in reverse dependency order (if available)
+      if (availableTables.orderItem) await tx.orderItem.deleteMany();
+      if (availableTables.order) await tx.order.deleteMany();
+      if (availableTables.product) await tx.product.deleteMany();
+      if (availableTables.category) await tx.category.deleteMany();
+      if (availableTables.brand) await tx.brand.deleteMany();
+      if (availableTables.offer) await tx.offer.deleteMany();
+      if (availableTables.blog) await tx.blog.deleteMany();
+      if (availableTables.hero) await tx.hero.deleteMany();
+      if (availableTables.medicalTip) await tx.medicalTip.deleteMany();
+      if (availableTables.imageStore) await tx.imageStore.deleteMany();
+      if (availableTables.user) await tx.user.deleteMany();
 
-      // 2. Insert records in dependency order
-      if (dbData.user && dbData.user.length > 0) {
+      // 2. Insert records in dependency order (if available)
+      if (availableTables.user && dbData.user && dbData.user.length > 0) {
         await tx.user.createMany({ data: dbData.user });
       }
       
-      if (dbData.category && dbData.category.length > 0) {
+      if (availableTables.category && dbData.category && dbData.category.length > 0) {
         await tx.category.createMany({ data: dbData.category });
       }
 
-      if (dbData.brand && dbData.brand.length > 0) {
+      if (availableTables.brand && dbData.brand && dbData.brand.length > 0) {
         await tx.brand.createMany({ data: dbData.brand });
       }
 
-      if (dbData.product && dbData.product.length > 0) {
+      if (availableTables.product && dbData.product && dbData.product.length > 0) {
         await tx.product.createMany({ data: dbData.product });
       }
 
-      if (dbData.order && dbData.order.length > 0) {
+      if (availableTables.order && dbData.order && dbData.order.length > 0) {
         await tx.order.createMany({ data: dbData.order });
       }
 
-      if (dbData.orderItem && dbData.orderItem.length > 0) {
+      if (availableTables.orderItem && dbData.orderItem && dbData.orderItem.length > 0) {
         await tx.orderItem.createMany({ data: dbData.orderItem });
       }
 
-      if (dbData.offer && dbData.offer.length > 0) {
+      if (availableTables.offer && dbData.offer && dbData.offer.length > 0) {
         await tx.offer.createMany({ data: dbData.offer });
       }
 
-      if (dbData.blog && dbData.blog.length > 0) {
+      if (availableTables.blog && dbData.blog && dbData.blog.length > 0) {
         await tx.blog.createMany({ data: dbData.blog });
       }
 
-      if (dbData.hero && dbData.hero.length > 0) {
+      if (availableTables.hero && dbData.hero && dbData.hero.length > 0) {
         await tx.hero.createMany({ data: dbData.hero });
       }
 
-      if (dbData.medicalTip && dbData.medicalTip.length > 0) {
+      if (availableTables.medicalTip && dbData.medicalTip && dbData.medicalTip.length > 0) {
         await tx.medicalTip.createMany({ data: dbData.medicalTip });
       }
 
-      if (dbData.imageStore && dbData.imageStore.length > 0) {
+      if (availableTables.imageStore && dbData.imageStore && dbData.imageStore.length > 0) {
+        // Resolve binaries from ZIP first
+        for (const row of dbData.imageStore) {
+          const dataEntry = zip.getEntry(`imageStore/${row.id}_data.bin`);
+          if (dataEntry) {
+            row.data = dataEntry.getData();
+          }
+          const thumbEntry = zip.getEntry(`imageStore/${row.id}_thumb.bin`);
+          if (thumbEntry) {
+            row.thumbnailData = thumbEntry.getData();
+          }
+        }
+
         const imageStoresToInsert = dbData.imageStore.map(item => ({
           ...item,
-          data: item.data ? Buffer.from(item.data.data || item.data) : undefined,
-          thumbnailData: item.thumbnailData ? Buffer.from(item.thumbnailData.data || item.thumbnailData) : undefined
+          data: item.data ? (Buffer.isBuffer(item.data) ? item.data : Buffer.from(item.data.data || item.data)) : undefined,
+          thumbnailData: item.thumbnailData ? (Buffer.isBuffer(item.thumbnailData) ? item.thumbnailData : Buffer.from(item.thumbnailData.data || item.thumbnailData)) : undefined
         }));
         await tx.imageStore.createMany({ data: imageStoresToInsert });
       }
