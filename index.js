@@ -1657,6 +1657,21 @@ app.delete('/api/blog/:id', adminAuthenticate, async (req, res) => {
   }
 });
 
+const translate = require('google-translate-api-x');
+
+// ── Translation Route ─────────────────────────────────────────
+app.post('/api/translate', adminAuthenticate, async (req, res) => {
+  const { text, from = 'ar', to = 'en' } = req.body;
+  if (!text) return res.status(400).json({ error: 'Text is required' });
+  try {
+    const result = await translate(text, { from, to });
+    res.json({ text: result.text });
+  } catch (error) {
+    console.error('Translation error:', error);
+    res.status(500).json({ error: error.message || 'Translation failed' });
+  }
+});
+
 // ── Medical Tips Routes ───────────────────────────────────────
 app.get('/api/medical-tips', async (req, res) => {
   try {
@@ -1680,10 +1695,10 @@ app.get('/api/medical-tips/:id', async (req, res) => {
 });
 
 app.post('/api/medical-tips', adminAuthenticate, async (req, res) => {
-  const { title, content, image } = req.body;
+  const { title, titleEn, content, contentEn, image } = req.body;
   try {
     const tip = await prisma.medicalTip.create({
-      data: { title, content, image }
+      data: { title, titleEn, content, contentEn, image }
     });
     res.json(tip);
   } catch (error) {
@@ -1693,11 +1708,11 @@ app.post('/api/medical-tips', adminAuthenticate, async (req, res) => {
 });
 
 app.patch('/api/medical-tips/:id', adminAuthenticate, async (req, res) => {
-  const { title, content, image } = req.body;
+  const { title, titleEn, content, contentEn, image } = req.body;
   try {
     const tip = await prisma.medicalTip.update({
       where: { id: req.params.id },
-      data: { title, content, image }
+      data: { title, titleEn, content, contentEn, image }
     });
     res.json(tip);
   } catch (error) {

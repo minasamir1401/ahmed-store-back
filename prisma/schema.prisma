@@ -216,7 +216,9 @@ model ImageStore {
 model MedicalTip {
   id        String   @id @default(cuid())
   title     String
+  titleEn   String?
   content   String
+  contentEn String?
   image     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
