@@ -626,6 +626,16 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       },
       body: JSON.stringify(payload)
     });
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      const textError = await response.text();
+      console.error("OpenRouter returned non-JSON error:", response.status, textError);
+      if (isFAQRequest) {
+        return fallbackHandler();
+      }
+      return res.status(503).json({ error: { message: "خدمة الذكاء الاصطناعي مشغولة حالياً أو غير متاحة. يرجى المحاولة لاحقاً." } });
+    }
+
     const data = await response.json();
     if (!response.ok) {
       console.warn('OpenRouter API returned error status:', response.status, data);
@@ -640,7 +650,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     if (isFAQRequest) {
       return fallbackHandler();
     }
-    res.status(500).json({ error: error.message });
+    res.status(503).json({ error: { message: "تعذر الاتصال بخدمة الذكاء الاصطناعي. يرجى المحاولة لاحقاً." } });
   }
 });
 
