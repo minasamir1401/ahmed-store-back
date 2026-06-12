@@ -603,8 +603,45 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     });
   };
 
-  // Support Google Gemini API directly with live Google Search grounding
+  // Support Puter AI directly with live Web Search grounding
+  const puterKey = process.env.PUTER_API_KEY || '';
   const requestedModel = req.body.model || '';
+
+  if (req.body.provider === 'puter' || (requestedModel.includes('puter') || (!process.env.OPENROUTER_API_KEY && !process.env.GEMINI_API_KEY && puterKey))) {
+    try {
+      if (!puterKey) throw new Error('Puter API key is missing');
+      const messages = req.body.messages || [];
+      const formattedMessages = messages.map(m => ({
+        role: m.role === 'system' ? 'system' : m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content || ''
+      }));
+
+      const response = await fetch('https://api.puter.com/puterai/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${puterKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: formattedMessages,
+          tools: [{ type: 'web_search' }] // Enable Puter web search grounding
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return res.json(data);
+      } else {
+        const errText = await response.text();
+        console.warn('Puter API returned error status:', response.status, errText);
+      }
+    } catch (err) {
+      console.warn('[Puter direct call failed, falling back]', err);
+    }
+  }
+
+  // Support Google Gemini API directly with live Google Search grounding
   const geminiKey = process.env.GEMINI_API_KEY || '';
   
   if (geminiKey && (requestedModel.includes('gemini') || !process.env.OPENROUTER_API_KEY)) {
@@ -711,7 +748,8 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
   const { bmi, statusText, height, weight, age, gender, language } = req.body;
   const apiKey = process.env.OPENROUTER_API_KEY || '';
   const geminiKey = process.env.GEMINI_API_KEY || '';
-  if (!apiKey && !geminiKey) return res.status(503).json({ error: 'AI service is not configured' });
+  const puterKey = process.env.PUTER_API_KEY || '';
+  if (!apiKey && !geminiKey && !puterKey) return res.status(503).json({ error: 'AI service is not configured' });
 
   const numericBmi = Number(bmi);
   if (!Number.isFinite(numericBmi) || numericBmi <= 0 || numericBmi > 100) {
@@ -744,6 +782,33 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
       }
     } catch (err) {
       console.error('Gemini BMI error:', err);
+    }
+  }
+
+  if (puterKey && !apiKey && !geminiKey) {
+    try {
+      const response = await fetch('https://api.puter.com/puterai/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${puterKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: userMessage }
+          ],
+          tools: [{ type: 'web_search' }]
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.choices?.[0]?.message?.content || '';
+        return res.json({ advice: text });
+      }
+    } catch (err) {
+      console.error('Puter BMI error:', err);
     }
   }
 
