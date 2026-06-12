@@ -662,7 +662,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
         },
         tools: [
           {
-            googleSearch: {} // Enables Google Search Grounding for real-time web search!
+            google_search: {} // Enables Google Search Grounding for real-time web search!
           }
         ]
       };
