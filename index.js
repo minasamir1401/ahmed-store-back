@@ -657,7 +657,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   // Support Google Gemini API directly with live Google Search grounding
   const geminiKey = process.env.GEMINI_API_KEY || '';
   
-  if (geminiKey && (requestedModel.includes('gemini') || !process.env.OPENROUTER_API_KEY)) {
+  if (geminiKey && (req.body.provider === 'gemini' || requestedModel.includes('gemini') || !process.env.OPENROUTER_API_KEY)) {
     try {
       const messages = req.body.messages || [];
       const userMsg = messages.find(m => m.role === 'user')?.content || '';
