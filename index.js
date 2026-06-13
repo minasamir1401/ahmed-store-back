@@ -717,6 +717,14 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
     const payload = { ...req.body };
     delete payload.apiKey;
+    delete payload.provider;
+
+    // OpenRouter expects 'model' (singular). If the frontend sends 'models' array, pick the first one.
+    if (!payload.model && Array.isArray(payload.models) && payload.models.length > 0) {
+      payload.model = payload.models[0];
+    }
+    // Remove the non-standard 'models' field so OpenRouter doesn't reject the request
+    delete payload.models;
 
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
