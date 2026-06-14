@@ -14,7 +14,7 @@ model User {
   name            String?
   phone           String?
   role            String    @default("customer") // "customer" or "admin"
-  cart            String?   // JSON string of cart items
+  cart            String? // JSON string of cart items
   resetOtpCode    String?
   resetOtpExpires DateTime?
   createdAt       DateTime  @default(now())
@@ -69,27 +69,27 @@ model Product {
   seoDesc       String?
   category      Category @relation(fields: [categoryId], references: [id])
   categoryId    String
-  brand         Brand?    @relation(fields: [brandId], references: [id])
+  brand         Brand?   @relation(fields: [brandId], references: [id])
   brandId       String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   // NEW FIELDS
-  sizeOptions     String? // JSON string: [{ size: string, price: number, originalPrice?: number }]
-  specifications  String? // JSON string: [{ label: string, value: string, bold?: boolean, tooltip?: string }]
-  keyInfo         String? // JSON string: [{ label: string, value: string }]
-  certifications  String? // JSON string: string[]
-  usage           String?
-  usageEn         String?
-  ingredients     String?
-  ingredientsEn   String?
-  supplementFacts String? // JSON string: { servingSize: string, servingsPerContainer: string, rows: [{ label: string, amount: string, dv: string }] }
-  warnings        String?
-  warningsEn      String?
-  disclaimer      String?
-  disclaimerEn    String?
-  seoKeywordsEn   String?
-  seoDescEn       String?
+  sizeOptions      String? // JSON string: [{ size: string, price: number, originalPrice?: number }]
+  specifications   String? // JSON string: [{ label: string, value: string, bold?: boolean, tooltip?: string }]
+  keyInfo          String? // JSON string: [{ label: string, value: string }]
+  certifications   String? // JSON string: string[]
+  usage            String?
+  usageEn          String?
+  ingredients      String?
+  ingredientsEn    String?
+  supplementFacts  String? // JSON string: { servingSize: string, servingsPerContainer: string, rows: [{ label: string, amount: string, dv: string }] }
+  warnings         String?
+  warningsEn       String?
+  disclaimer       String?
+  disclaimerEn     String?
+  seoKeywordsEn    String?
+  seoDescEn        String?
   dosageCalculator String? // JSON string representing the interactive calculator config
   faqs             String? // JSON string representing array of FAQs [{ question_ar, answer_ar, question_en, answer_en }]
 
@@ -123,59 +123,59 @@ model Blog {
 }
 
 model Hero {
-  id          String   @id @default("hero-section")
-  title       String   @default("العناية تبدأ من هنا")
-  subtitle    String   @default("مجموعة مختارة من أفضل منتجات العناية والشعر")
-  image       String   @default("https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80")
-  buttonText  String   @default("تسوق الآن")
-  buttonLink  String   @default("/products")
-  side1Title  String   @default("الأقسام")
-  side1Desc   String   @default("تصفح كافة التصنيفات")
-  side1Image  String   @default("https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80")
-  side1Link   String   @default("/categories")
-  side2Title  String   @default("عروض حصرية")
-  side2Desc   String   @default("خصومات لفترة محدودة")
-  side2Image  String   @default("https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80")
-  side2Link   String   @default("/offers")
-  prod1Id      String?
-  prod1Image   String?
-  prod1Type    String?   @default("product")
-  prod2Id      String?
-  prod2Image   String?
-  prod2Type    String?   @default("product")
-  prod3Id      String?
-  prod3Image   String?
-  prod3Type    String?   @default("product")
-  prod4Id      String?
-  prod4Image   String?
-  prod4Type    String?   @default("product")
-  slides       String?
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default("hero-section")
+  title      String   @default("العناية تبدأ من هنا")
+  subtitle   String   @default("مجموعة مختارة من أفضل منتجات العناية والشعر")
+  image      String   @default("https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80")
+  buttonText String   @default("تسوق الآن")
+  buttonLink String   @default("/products")
+  side1Title String   @default("الأقسام")
+  side1Desc  String   @default("تصفح كافة التصنيفات")
+  side1Image String   @default("https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80")
+  side1Link  String   @default("/categories")
+  side2Title String   @default("عروض حصرية")
+  side2Desc  String   @default("خصومات لفترة محدودة")
+  side2Image String   @default("https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80")
+  side2Link  String   @default("/offers")
+  prod1Id    String?
+  prod1Image String?
+  prod1Type  String?  @default("product")
+  prod2Id    String?
+  prod2Image String?
+  prod2Type  String?  @default("product")
+  prod3Id    String?
+  prod3Image String?
+  prod3Type  String?  @default("product")
+  prod4Id    String?
+  prod4Image String?
+  prod4Type  String?  @default("product")
+  slides     String?
+  updatedAt  DateTime @updatedAt
 }
 
 model Order {
-  id              String      @id @default(cuid())
-  orderNumber     String      @unique
-  customerName    String
-  customerEmail   String?
-  customerPhone   String
-  governorate     String
-  district        String
-  address         String
-  building        String?
-  floor           String?
-  apartment       String?
-  notes           String?
-  paymentMethod   String      @default("cod")
-  shippingFee     Float       @default(0)
-  total           Float
-  status          String      @default("pending") // pending, shipped, delivered, cancelled
-  shippingRef     String?     // Aramex Tracking Number
-  userId          String?     // Link to User if logged in
-  user            User?       @relation(fields: [userId], references: [id])
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-  items           OrderItem[]
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique
+  customerName  String
+  customerEmail String?
+  customerPhone String
+  governorate   String
+  district      String
+  address       String
+  building      String?
+  floor         String?
+  apartment     String?
+  notes         String?
+  paymentMethod String      @default("cod")
+  shippingFee   Float       @default(0)
+  total         Float
+  status        String      @default("pending") // pending, shipped, delivered, cancelled
+  shippingRef   String? // Aramex Tracking Number
+  userId        String? // Link to User if logged in
+  user          User?       @relation(fields: [userId], references: [id])
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  items         OrderItem[]
 
   @@index([createdAt])
   @@index([status])
@@ -196,21 +196,6 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
-}
-
-model ImageStore {
-  id            String   @id @default(cuid())
-  mimeType      String
-  data          Bytes
-  thumbnailData Bytes?
-  fileName      String?
-  altText       String?
-  width         Int?
-  height        Int?
-  size          Int?
-  createdAt     DateTime @default(now())
-
-  @@index([createdAt])
 }
 
 model MedicalTip {

@@ -11,7 +11,7 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const sharp = require('sharp');
-const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./whatsapp');
+const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./src/services/whatsappService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -214,8 +214,8 @@ prisma.$connect()
 
 // ── CORS ───────────────────────────────────────────────────────
 const defaultOrigins = process.env.NODE_ENV === 'production'
-  ? ['https://ahmed.red-gate.tech', 'https://ahmed-api.red-gate.tech']
-  : ['https://ahmed.red-gate.tech', 'http://ahmed.red-gate.tech', 'https://ahmed-api.red-gate.tech', 'http://localhost:3000', 'http://localhost:5000'];
+  ? ['https://the-vitahub.com', 'https://api.the-vitahub.com']
+  : ['https://the-vitahub.com', 'http://the-vitahub.com', 'https://api.the-vitahub.com', 'http://localhost:3000', 'http://localhost:5000'];
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
@@ -244,7 +244,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       imgSrc: ["'self'", "data:", "https://images.unsplash.com"],
-      connectSrc: ["'self'", "https://ahmed-api.red-gate.tech", "http://localhost:5000"]
+      connectSrc: ["'self'", "https://api.the-vitahub.com", "http://localhost:5000"]
     }
   },
   crossOriginResourcePolicy: { policy: 'cross-origin' }
@@ -389,99 +389,23 @@ app.post('/api/upload-multiple', adminAuthenticate, upload.array('images', 10), 
   }
 });
 
-app.get('/api/images/:id/meta', async (req, res) => {
-  try {
-    const image = await prisma.imageStore.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, mimeType: true, fileName: true, altText: true, width: true, height: true, size: true, createdAt: true }
-    });
-    if (!image) return res.status(404).json({ error: 'Not found' });
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.json({ ...image, url: toImageUrl(image.id), thumbnailUrl: toImageUrl(image.id, 'thumb') });
-  } catch(e) {
-    console.error('Error fetching image metadata:', e);
-    res.status(500).json({ error: 'Error' });
-  }
+app.get('/api/images/:id/meta', (req, res) => {
+  res.status(404).json({ error: 'Legacy ImageStore is deprecated. Please use /uploads/' });
 });
 
 // Reusable placeholder SVG for missing/broken images
 const PLACEHOLDER_SVG = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><rect width="400" height="400" fill="#f1f5f9"/><rect x="140" y="130" width="120" height="100" rx="8" fill="#cbd5e1"/><circle cx="170" cy="155" r="12" fill="#94a3b8"/><polygon points="140,230 185,175 215,205 240,185 260,230" fill="#94a3b8"/><text x="200" y="270" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#94a3b8">صورة غير متاحة</text></svg>`);
 
-app.get('/api/images/:id/thumb', async (req, res) => {
-  try {
-    const image = await prisma.imageStore.findUnique({
-      where: { id: req.params.id },
-      select: { mimeType: true, data: true, thumbnailData: true }
-    });
-    if (!image) {
-      res.setHeader('Content-Type', 'image/svg+xml');
-      res.setHeader('Cache-Control', 'public, max-age=60');
-      return res.send(PLACEHOLDER_SVG);
-    }
-    let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
-    if (!allowedImageTypes.has(mimeType)) {
-      const hex = Buffer.from(image.thumbnailData || image.data).toString('hex', 0, 8);
-      for (const [mime, prefixes] of allowedImageTypes.entries()) {
-        if (prefixes.some(p => hex.startsWith(p))) {
-          mimeType = mime;
-          break;
-        }
-      }
-    }
-    
-    if (!allowedImageTypes.has(mimeType)) {
-      res.setHeader('Content-Type', 'image/svg+xml');
-      return res.send(PLACEHOLDER_SVG);
-    }
-    const buf = image.thumbnailData || image.data;
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
-  } catch(e) {
-    console.error(`[ImageThumb] Error id=${req.params.id}:`, e);
-    res.setHeader('Content-Type', 'image/svg+xml');
-    res.send(PLACEHOLDER_SVG);
-  }
+app.get('/api/images/:id/thumb', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  return res.send(PLACEHOLDER_SVG);
 });
 
-app.get('/api/images/:id', async (req, res) => {
-  try {
-    const image = await prisma.imageStore.findUnique({
-      where: { id: req.params.id },
-      select: { mimeType: true, data: true, fileName: true }
-    });
-    if (!image) {
-      res.setHeader('Content-Type', 'image/svg+xml');
-      res.setHeader('Cache-Control', 'public, max-age=60');
-      return res.send(PLACEHOLDER_SVG);
-    }
-    let mimeType = image.mimeType === 'image/jpg' ? 'image/jpeg' : image.mimeType;
-    if (!allowedImageTypes.has(mimeType)) {
-      const hex = Buffer.from(image.data).toString('hex', 0, 8);
-      for (const [mime, prefixes] of allowedImageTypes.entries()) {
-        if (prefixes.some(p => hex.startsWith(p))) {
-          mimeType = mime;
-          break;
-        }
-      }
-    }
-    
-    if (!allowedImageTypes.has(mimeType)) {
-      res.setHeader('Content-Type', 'image/svg+xml');
-      return res.send(PLACEHOLDER_SVG);
-    }
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Type', mimeType);
-    if (image.fileName) res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(image.fileName)}`);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    const buf = image.data;
-    res.send(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
-  } catch(e) {
-    console.error(`[Image] Error id=${req.params.id}:`, e);
-    res.setHeader('Content-Type', 'image/svg+xml');
-    res.send(PLACEHOLDER_SVG);
-  }
+app.get('/api/images/:id', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  return res.send(PLACEHOLDER_SVG);
 });
 
 // ── AI Endpoints ──────────────────────────────────────────────
@@ -997,7 +921,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
 
     // Send welcome message via WhatsApp asynchronously
-    const welcomeMessage = `مرحباً بك يا ${user.name} في Vitamins HUB! 🌟\nتم إنشاء حسابك بنجاح باستخدام هذا الرقم.\nيسعدنا انضمامك إلينا!`;
+    const welcomeMessage = `مرحباً بك يا ${user.name} في The VitaHub! 🌟\nتم إنشاء حسابك بنجاح باستخدام هذا الرقم.\nيسعدنا انضمامك إلينا!`;
     sendWhatsAppMessage(user.phone, welcomeMessage);
   } catch (error) {
     res.status(500).json({ error: 'فشل في إنشاء الحساب، يرجى المحاولة لاحقاً' });
@@ -1919,7 +1843,7 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     res.status(201).json(order);
 
     // Send order confirmation message via WhatsApp asynchronously
-    const orderMessage = `مرحباً ${order.customerName}،\nتم استلام طلبك بنجاح! 🎉\nرقم الطلب: #${order.orderNumber}\nإجمالي السعر: ${order.total} ج.م.\nشكراً لتسوقك من Vitamins HUB!`;
+    const orderMessage = `مرحباً ${order.customerName}،\nتم استلام طلبك بنجاح! 🎉\nرقم الطلب: #${order.orderNumber}\nإجمالي السعر: ${order.total} ج.م.\nشكراً لتسوقك من The VitaHub!`;
     sendWhatsAppMessage(order.customerPhone, orderMessage);
   } catch (error) {
     console.error('POST /api/orders error:', error);
