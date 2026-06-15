@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const sharp = require('sharp');
 const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./src/services/whatsappService');
+const { notifyGoogleIndexing } = require('./src/services/googleIndexingService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -1438,6 +1439,8 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
         supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
       }
     });
+    // Notify Google Indexing API
+    notifyGoogleIndexing(`https://the-vitahub.com/product/${product.id}`, 'URL_UPDATED');
     res.status(201).json(product);
   } catch (error) {
     console.error('POST /api/products error:', error);
@@ -1465,6 +1468,8 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
         supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
       }
     });
+    // Notify Google Indexing API
+    notifyGoogleIndexing(`https://the-vitahub.com/product/${product.id}`, 'URL_UPDATED');
     res.json(product);
   } catch (error) {
     console.error('PATCH /api/products error:', error);
@@ -1475,6 +1480,8 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
 app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
   try {
     await prisma.product.delete({ where: { id: req.params.id } });
+    // Notify Google Indexing API
+    notifyGoogleIndexing(`https://the-vitahub.com/product/${req.params.id}`, 'URL_DELETED');
     res.json({ message: 'Product deleted' });
   } catch (error) {
     console.error('Error:', error);

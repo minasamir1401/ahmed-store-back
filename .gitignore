@@ -7,3 +7,5 @@ dev.db-journal
 .wwebjs_cache/
 uploads/
 *.log
+google-indexing-key.json  
+ 
