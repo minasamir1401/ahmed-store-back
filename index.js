@@ -645,40 +645,72 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     delete payload.apiKey;
     delete payload.provider;
 
-    // OpenRouter expects 'model' (singular). If the frontend sends 'models' array, pick the first one.
-    if (!payload.model && Array.isArray(payload.models) && payload.models.length > 0) {
-      payload.model = payload.models[0];
+    const modelsToTry = [];
+    if (payload.model) modelsToTry.push(payload.model);
+    if (Array.isArray(payload.models)) {
+      payload.models.forEach(m => {
+        if (!modelsToTry.includes(m)) modelsToTry.push(m);
+      });
     }
-    // Remove the non-standard 'models' field so OpenRouter doesn't reject the request
     delete payload.models;
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
-    const contentType = response.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      const textError = await response.text();
-      console.error("OpenRouter returned non-JSON error:", response.status, textError);
-      if (isFAQRequest) {
-        return fallbackHandler();
-      }
-      return res.status(503).json({ error: { message: "خدمة الذكاء الاصطناعي مشغولة حالياً أو غير متاحة. يرجى المحاولة لاحقاً." } });
+    if (modelsToTry.length === 0) {
+      modelsToTry.push('google/gemma-4-31b-it:free');
     }
 
-    const data = await response.json();
-    if (!response.ok) {
-      console.warn('OpenRouter API returned error status:', response.status, data);
+    let lastError = null;
+    let responseData = null;
+    let success = false;
+    let lastStatus = 503;
+
+    for (const modelName of modelsToTry) {
+      try {
+        console.log(`[OpenRouter] Trying model: ${modelName}`);
+        payload.model = modelName;
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        lastStatus = response.status;
+        const contentType = response.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          const textError = await response.text();
+          throw new Error(`Non-JSON response (${response.status}): ${textError}`);
+        }
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(`API returned error (${response.status}): ${JSON.stringify(data)}`);
+        }
+
+        responseData = data;
+        success = true;
+        break; // Success! Exit the loop.
+      } catch (err) {
+        console.warn(`[OpenRouter] Model ${modelName} failed:`, err.message);
+        lastError = err;
+      }
+    }
+
+    if (!success) {
+      console.error('[OpenRouter] All models failed. Last error:', lastError);
       if (isFAQRequest) {
         return fallbackHandler();
       }
-      return res.status(response.status).json(data);
+      return res.status(lastStatus).json({ 
+        error: { 
+          message: "فشلت محاولات الاتصال بالذكاء الاصطناعي على كافة النماذج المتاحة. يرجى المحاولة لاحقاً.",
+          details: lastError ? lastError.message : undefined
+        } 
+      });
     }
-    res.json(data);
+
+    res.json(responseData);
   } catch (error) {
     console.error('AI Proxy Error:', error);
     if (isFAQRequest) {
