@@ -79,7 +79,9 @@ const slugifyFileName = (value, fallback = 'product-image') => {
   const ascii = normalizeString(value, 120)
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u060C\u061B\u061F\u066A-\u066D]/g, '-')
     .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, '-')
+    .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
   return ascii || fallback;
