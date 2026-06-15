@@ -1324,10 +1324,10 @@ app.get('/api/products', async (req, res) => {
       ...(Object.keys(priceFilter).length > 0 ? { price: priceFilter } : {}),
       ...(q ? {
         OR: [
-          { title: { contains: q } },
-          { titleEn: { contains: q } },
-          { seoKeywords: { contains: q } },
-          { seoKeywordsEn: { contains: q } }
+          { title: { contains: q, mode: 'insensitive' } },
+          { titleEn: { contains: q, mode: 'insensitive' } },
+          { seoKeywords: { contains: q, mode: 'insensitive' } },
+          { seoKeywordsEn: { contains: q, mode: 'insensitive' } }
         ]
       } : {})
     };
