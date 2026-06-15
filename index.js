@@ -262,7 +262,7 @@ const authLimiter = rateLimit({
 
 const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 120,
+  limit: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'محاولات كثيرة، يرجى المحاولة لاحقاً' }
@@ -1343,13 +1343,18 @@ app.get('/api/products', async (req, res) => {
       brand: { select: { id: true, name: true, image: true } }
     };
 
+    const maxPriceAggregate = await prisma.product.aggregate({
+      _max: { price: true }
+    });
+    const maxProductPrice = maxPriceAggregate._max.price || 5000;
+
     const [products, total] = await prisma.$transaction([
       prisma.product.findMany({ where, skip, take, include, orderBy }),
       prisma.product.count({ where })
     ]);
 
     if (isLegacyList) return res.json(products);
-    res.json({ items: products, total, page, limit: take });
+    res.json({ items: products, total, page, limit: take, maxPrice: maxProductPrice });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
