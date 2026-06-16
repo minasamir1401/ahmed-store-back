@@ -2240,6 +2240,209 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
   }
 });
 
+app.post('/api/admin/clean-base64-images', adminAuthenticate, async (req, res) => {
+  const PLACEHOLDER_IMAGE = "https://placehold.co/400x400?text=No+Image";
+
+  const HERO_DEFAULTS = {
+    image: "https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80",
+    side1Image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80",
+    side2Image: "https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80",
+  };
+
+  function isBase64Image(str) {
+    if (typeof str !== 'string') return false;
+    const trimmed = str.trim();
+    return trimmed.startsWith('data:image/') || trimmed.startsWith('data:') || trimmed.includes(';base64,');
+  }
+
+  function cleanImagesList(imagesStr) {
+    if (!imagesStr) return null;
+    const list = imagesStr.split(',')
+      .map(img => img.trim())
+      .filter(img => img && !isBase64Image(img));
+    return list.length > 0 ? list.join(',') : null;
+  }
+
+  function cleanSlidesJson(slidesStr) {
+    if (!slidesStr) return null;
+    try {
+      const slides = JSON.parse(slidesStr);
+      if (!Array.isArray(slides)) return slidesStr;
+      let modified = false;
+      const cleanedSlides = slides.map(slide => {
+        if (slide && isBase64Image(slide.image)) {
+          modified = true;
+          return { ...slide, image: HERO_DEFAULTS.image };
+        }
+        return slide;
+      });
+      return modified ? JSON.stringify(cleanedSlides) : slidesStr;
+    } catch (e) {
+      return slidesStr;
+    }
+  }
+
+  try {
+    let totalUpdated = 0;
+
+    // 1. Categories
+    const categories = await prisma.category.findMany();
+    for (const item of categories) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.category.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 2. Brands
+    const brands = await prisma.brand.findMany();
+    for (const item of brands) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.brand.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 3. Products
+    const products = await prisma.product.findMany();
+    for (const item of products) {
+      let needsUpdate = false;
+      const updateData = {};
+
+      if (isBase64Image(item.image)) {
+        needsUpdate = true;
+        updateData.image = PLACEHOLDER_IMAGE;
+      }
+
+      if (item.images) {
+        const cleanedImages = cleanImagesList(item.images);
+        if (cleanedImages !== item.images) {
+          needsUpdate = true;
+          updateData.images = cleanedImages;
+        }
+      }
+
+      if (needsUpdate) {
+        totalUpdated++;
+        await prisma.product.update({
+          where: { id: item.id },
+          data: updateData
+        });
+      }
+    }
+
+    // 4. Offers
+    const offers = await prisma.offer.findMany();
+    for (const item of offers) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.offer.update({
+          where: { id: item.id },
+          data: { image: PLACEHOLDER_IMAGE }
+        });
+      }
+    }
+
+    // 5. Blogs
+    const blogs = await prisma.blog.findMany();
+    for (const item of blogs) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.blog.update({
+          where: { id: item.id },
+          data: { image: PLACEHOLDER_IMAGE }
+        });
+      }
+    }
+
+    // 6. Hero
+    const heros = await prisma.hero.findMany();
+    for (const item of heros) {
+      let needsUpdate = false;
+      const updateData = {};
+
+      if (isBase64Image(item.image)) {
+        needsUpdate = true;
+        updateData.image = HERO_DEFAULTS.image;
+      }
+      if (isBase64Image(item.side1Image)) {
+        needsUpdate = true;
+        updateData.side1Image = HERO_DEFAULTS.side1Image;
+      }
+      if (isBase64Image(item.side2Image)) {
+        needsUpdate = true;
+        updateData.side2Image = HERO_DEFAULTS.side2Image;
+      }
+      if (isBase64Image(item.prod1Image)) {
+        needsUpdate = true;
+        updateData.prod1Image = null;
+      }
+      if (isBase64Image(item.prod2Image)) {
+        needsUpdate = true;
+        updateData.prod2Image = null;
+      }
+      if (isBase64Image(item.prod3Image)) {
+        needsUpdate = true;
+        updateData.prod3Image = null;
+      }
+      if (isBase64Image(item.prod4Image)) {
+        needsUpdate = true;
+        updateData.prod4Image = null;
+      }
+      if (item.slides) {
+        const cleanedSlides = cleanSlidesJson(item.slides);
+        if (cleanedSlides !== item.slides) {
+          needsUpdate = true;
+          updateData.slides = cleanedSlides;
+        }
+      }
+
+      if (needsUpdate) {
+        totalUpdated++;
+        await prisma.hero.update({
+          where: { id: item.id },
+          data: updateData
+        });
+      }
+    }
+
+    // 7. OrderItems
+    const orderItems = await prisma.orderItem.findMany();
+    for (const item of orderItems) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.orderItem.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 8. MedicalTips
+    const medicalTips = await prisma.medicalTip.findMany();
+    for (const item of medicalTips) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.medicalTip.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    res.json({ message: 'تم تنظيف قاعدة البيانات بنجاح وحذف كافة الصور الـ Base64', count: totalUpdated });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء تنظيف قاعدة البيانات: ' + error.message });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error('Unhandled API error:', err);
   const status = err.status || (err.message === 'Invalid file type' ? 400 : 500);
@@ -2247,7 +2450,220 @@ app.use((err, req, res, next) => {
 });
 
 
+async function runAutoCleanup() {
+  console.log('[Auto-Cleanup] Starting background database cleanup for Base64 images...');
+  const PLACEHOLDER_IMAGE = "https://placehold.co/400x400?text=No+Image";
+
+  const HERO_DEFAULTS = {
+    image: "https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=700&q=80",
+    side1Image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=400&q=80",
+    side2Image: "https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80",
+  };
+
+  function isBase64Image(str) {
+    if (typeof str !== 'string') return false;
+    const trimmed = str.trim();
+    return trimmed.startsWith('data:image/') || trimmed.startsWith('data:') || trimmed.includes(';base64,');
+  }
+
+  function cleanImagesList(imagesStr) {
+    if (!imagesStr) return null;
+    const list = imagesStr.split(',')
+      .map(img => img.trim())
+      .filter(img => img && !isBase64Image(img));
+    return list.length > 0 ? list.join(',') : null;
+  }
+
+  function cleanSlidesJson(slidesStr) {
+    if (!slidesStr) return null;
+    try {
+      const slides = JSON.parse(slidesStr);
+      if (!Array.isArray(slides)) return slidesStr;
+      let modified = false;
+      const cleanedSlides = slides.map(slide => {
+        if (slide && isBase64Image(slide.image)) {
+          modified = true;
+          return { ...slide, image: HERO_DEFAULTS.image };
+        }
+        return slide;
+      });
+      return modified ? JSON.stringify(cleanedSlides) : slidesStr;
+    } catch (e) {
+      return slidesStr;
+    }
+  }
+
+  try {
+    let totalUpdated = 0;
+
+    // 1. Categories
+    const categories = await prisma.category.findMany();
+    for (const item of categories) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.category.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 2. Brands
+    const brands = await prisma.brand.findMany();
+    for (const item of brands) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.brand.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 3. Products
+    const products = await prisma.product.findMany();
+    for (const item of products) {
+      let needsUpdate = false;
+      const updateData = {};
+
+      if (isBase64Image(item.image)) {
+        needsUpdate = true;
+        updateData.image = PLACEHOLDER_IMAGE;
+      }
+
+      if (item.images) {
+        const cleanedImages = cleanImagesList(item.images);
+        if (cleanedImages !== item.images) {
+          needsUpdate = true;
+          updateData.images = cleanedImages;
+        }
+      }
+
+      if (needsUpdate) {
+        totalUpdated++;
+        await prisma.product.update({
+          where: { id: item.id },
+          data: updateData
+        });
+      }
+    }
+
+    // 4. Offers
+    const offers = await prisma.offer.findMany();
+    for (const item of offers) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.offer.update({
+          where: { id: item.id },
+          data: { image: PLACEHOLDER_IMAGE }
+        });
+      }
+    }
+
+    // 5. Blogs
+    const blogs = await prisma.blog.findMany();
+    for (const item of blogs) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.blog.update({
+          where: { id: item.id },
+          data: { image: PLACEHOLDER_IMAGE }
+        });
+      }
+    }
+
+    // 6. Hero
+    const heros = await prisma.hero.findMany();
+    for (const item of heros) {
+      let needsUpdate = false;
+      const updateData = {};
+
+      if (isBase64Image(item.image)) {
+        needsUpdate = true;
+        updateData.image = HERO_DEFAULTS.image;
+      }
+      if (isBase64Image(item.side1Image)) {
+        needsUpdate = true;
+        updateData.side1Image = HERO_DEFAULTS.side1Image;
+      }
+      if (isBase64Image(item.side2Image)) {
+        needsUpdate = true;
+        updateData.side2Image = HERO_DEFAULTS.side2Image;
+      }
+      if (isBase64Image(item.prod1Image)) {
+        needsUpdate = true;
+        updateData.prod1Image = null;
+      }
+      if (isBase64Image(item.prod2Image)) {
+        needsUpdate = true;
+        updateData.prod2Image = null;
+      }
+      if (isBase64Image(item.prod3Image)) {
+        needsUpdate = true;
+        updateData.prod3Image = null;
+      }
+      if (isBase64Image(item.prod4Image)) {
+        needsUpdate = true;
+        updateData.prod4Image = null;
+      }
+      if (item.slides) {
+        const cleanedSlides = cleanSlidesJson(item.slides);
+        if (cleanedSlides !== item.slides) {
+          needsUpdate = true;
+          updateData.slides = cleanedSlides;
+        }
+      }
+
+      if (needsUpdate) {
+        totalUpdated++;
+        await prisma.hero.update({
+          where: { id: item.id },
+          data: updateData
+        });
+      }
+    }
+
+    // 7. OrderItems
+    const orderItems = await prisma.orderItem.findMany();
+    for (const item of orderItems) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.orderItem.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    // 8. MedicalTips
+    const medicalTips = await prisma.medicalTip.findMany();
+    for (const item of medicalTips) {
+      if (isBase64Image(item.image)) {
+        totalUpdated++;
+        await prisma.medicalTip.update({
+          where: { id: item.id },
+          data: { image: null }
+        });
+      }
+    }
+
+    if (totalUpdated > 0) {
+      console.log(`[Auto-Cleanup] Completed. Cleaned up Base64 images from ${totalUpdated} database records.`);
+    } else {
+      console.log(`[Auto-Cleanup] No Base64 images found. Database is clean.`);
+    }
+  } catch (error) {
+    console.error('[Auto-Cleanup] Error during background database cleanup:', error);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   initWhatsApp();
+  
+  // Run background cleanup on startup
+  runAutoCleanup();
+  
+  // Run background cleanup every 24 hours
+  setInterval(runAutoCleanup, 24 * 60 * 60 * 1000);
 });
