@@ -3,6 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
+const compression = require('compression');
 require('dotenv').config();
 const fs = require('fs');
 const crypto = require('crypto');
@@ -28,9 +29,11 @@ if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
 }
 
 const app = express();
+app.use(compression());
 app.set('trust proxy', 1);
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
+const SITE_URL = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
 
 const publicUserSelect = { id: true, email: true, name: true, phone: true, role: true };
 const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
@@ -272,8 +275,11 @@ const adminLimiter = rateLimit({
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 app.use(express.urlencoded({ limit: process.env.FORM_BODY_LIMIT || '1mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  maxAge: '1y',
-  immutable: true
+  maxAge: '7d',
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    res.setHeader('X-Robots-Tag', 'index, follow');
+  }
 }));
 
 
@@ -1276,6 +1282,7 @@ app.post('/api/whatsapp/logout', adminAuthenticate, async (req, res) => {
 // ── Brands Endpoints ──────────────────────────────────────────
 app.get('/api/brands', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
     const brands = await prisma.brand.findMany({
       orderBy: { createdAt: 'desc' }
     });
@@ -1304,6 +1311,7 @@ app.post('/api/brands', adminAuthenticate, async (req, res) => {
 
 app.get('/api/brands/:id', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
     const page = parsePositiveInt(req.query.page, 1, 100000);
     const limit = parsePositiveInt(req.query.limit, 24, 100);
     const skip = (page - 1) * limit;
@@ -1341,6 +1349,7 @@ app.delete('/api/brands/:id', adminAuthenticate, async (req, res) => {
 // ── Products Endpoints ────────────────────────────────────────
 app.get('/api/products', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=120, stale-while-revalidate=300');
     const page = parsePositiveInt(req.query.page, 1, 100000);
     const limit = parsePositiveInt(req.query.limit, 24, 100);
     const isLegacyList = !req.query.page && !req.query.limit;
@@ -1395,6 +1404,7 @@ app.get('/api/products', async (req, res) => {
 
 app.get('/api/products/:id', async (req, res) => {
   try {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: { category: true, brand: true }
@@ -1440,7 +1450,7 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
       }
     });
     // Notify Google Indexing API
-    notifyGoogleIndexing(`https://the-vitahub.com/product/${product.id}`, 'URL_UPDATED');
+    notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
     res.status(201).json(product);
   } catch (error) {
     console.error('POST /api/products error:', error);
@@ -1469,7 +1479,7 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
       }
     });
     // Notify Google Indexing API
-    notifyGoogleIndexing(`https://the-vitahub.com/product/${product.id}`, 'URL_UPDATED');
+    notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
     res.json(product);
   } catch (error) {
     console.error('PATCH /api/products error:', error);
@@ -1481,7 +1491,7 @@ app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
   try {
     await prisma.product.delete({ where: { id: req.params.id } });
     // Notify Google Indexing API
-    notifyGoogleIndexing(`https://the-vitahub.com/product/${req.params.id}`, 'URL_DELETED');
+    notifyGoogleIndexing(`${SITE_URL}/product/${req.params.id}`, 'URL_DELETED');
     res.json({ message: 'Product deleted' });
   } catch (error) {
     console.error('Error:', error);
@@ -1492,6 +1502,7 @@ app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
 // ── Categories Routes ─────────────────────────────────────────
 app.get('/api/categories', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
     const categories = await prisma.category.findMany({
       include: {
         _count: {
@@ -1654,6 +1665,7 @@ app.post('/api/translate', adminAuthenticate, async (req, res) => {
 // ── Medical Tips Routes ───────────────────────────────────────
 app.get('/api/medical-tips', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
     const tips = await prisma.medicalTip.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(tips);
   } catch (error) {
@@ -1664,6 +1676,7 @@ app.get('/api/medical-tips', async (req, res) => {
 
 app.get('/api/medical-tips/:id', async (req, res) => {
   try {
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
     const tip = await prisma.medicalTip.findUnique({ where: { id: req.params.id } });
     if (!tip) return res.status(404).json({ error: 'Not found' });
     res.json(tip);

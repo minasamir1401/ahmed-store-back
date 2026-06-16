@@ -208,3 +208,12 @@ model MedicalTip {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+model IndexingLog {
+  id        String   @id @default(cuid())
+  url       String
+  action    String   // "URL_UPDATED" or "URL_DELETED"
+  status    String   // "success" or "failed"
+  response  String?  // JSON string response or error details
+  createdAt DateTime @default(now())
+}
