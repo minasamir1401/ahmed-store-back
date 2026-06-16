@@ -2,21 +2,35 @@ const { google } = require('googleapis');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
-let key;
+let clientEmail = process.env.GOOGLE_INDEXING_CLIENT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+let privateKey = process.env.GOOGLE_INDEXING_PRIVATE_KEY || process.env.GOOGLE_PRIVATE_KEY;
 
-try {
-  if (process.env.GOOGLE_INDEXING_CREDENTIALS) {
-    key = JSON.parse(process.env.GOOGLE_INDEXING_CREDENTIALS);
-  } else {
-    key = require('../../google-indexing-key.json');
-  }
-} catch (err) {
-  console.error('[Google Indexing API] Could not load credentials:', err.message);
+if (privateKey) {
+  privateKey = privateKey.trim().replace(/^["']/, '').replace(/["']$/, '').replace(/\\n/g, '\n');
 }
 
-const jwtClient = key ? new google.auth.JWT({
-  email: key.client_email,
-  key: key.private_key,
+if (!clientEmail || !privateKey) {
+  try {
+    let key;
+    if (process.env.GOOGLE_INDEXING_CREDENTIALS) {
+      key = JSON.parse(process.env.GOOGLE_INDEXING_CREDENTIALS);
+    } else {
+      key = require('../../google-indexing-key.json');
+    }
+    if (key) {
+      clientEmail = clientEmail || key.client_email;
+      privateKey = privateKey || key.private_key;
+    }
+  } catch (err) {
+    if (!clientEmail || !privateKey) {
+      console.error('[Google Indexing API] Could not load credentials:', err.message);
+    }
+  }
+}
+
+const jwtClient = (clientEmail && privateKey) ? new google.auth.JWT({
+  email: clientEmail,
+  key: privateKey,
   scopes: ['https://www.googleapis.com/auth/indexing']
 }) : null;
 
