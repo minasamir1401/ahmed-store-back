@@ -2443,6 +2443,16 @@ app.post('/api/admin/clean-base64-images', adminAuthenticate, async (req, res) =
   }
 });
 
+app.get('/api/debug-images', async (req, res) => {
+  try {
+    const categories = await prisma.category.findMany({ select: { id: true, name: true, image: true }, take: 10 });
+    const products = await prisma.product.findMany({ select: { id: true, title: true, image: true, images: true }, take: 10 });
+    res.json({ categories, products });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error('Unhandled API error:', err);
   const status = err.status || (err.message === 'Invalid file type' ? 400 : 500);
