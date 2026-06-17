@@ -345,6 +345,27 @@ const backupUpload = multer({
     return cb(new Error(`Invalid file type for backup: ${file.mimetype || 'unknown'}. Only ZIP files are allowed.`));
   }
 });
+
+const excelUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, path.join(__dirname, 'uploads'));
+    },
+    filename: (req, file, cb) => {
+      cb(null, `import-${Date.now()}-${file.originalname}`);
+    }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ext = file.originalname ? path.extname(file.originalname).toLowerCase() : '';
+    const mime = file.mimetype ? file.mimetype.toLowerCase() : '';
+    if (ext === '.xlsx' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mime === 'application/octet-stream') {
+      return cb(null, true);
+    }
+    return cb(new Error('Only Excel (.xlsx) files are allowed.'));
+  }
+});
+
 // ── Upload Endpoints ──────────────────────────────────────────
 app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1337,6 +1358,25 @@ app.get('/api/brands/:id', async (req, res) => {
   }
 });
 
+app.patch('/api/brands/:id', adminAuthenticate, async (req, res) => {
+  const { name, nameEn, image } = req.body;
+  if (name !== undefined && !name.trim()) return res.status(400).json({ error: 'Brand name cannot be empty' });
+  try {
+    const brand = await prisma.brand.update({
+      where: { id: req.params.id },
+      data: {
+        name: name !== undefined ? name.trim() : undefined,
+        nameEn: nameEn !== undefined ? (nameEn || null) : undefined,
+        image: image !== undefined ? (image || null) : undefined
+      }
+    });
+    res.json(brand);
+  } catch (error) {
+    console.error('PATCH /api/brands/:id error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.delete('/api/brands/:id', adminAuthenticate, async (req, res) => {
   try {
     await prisma.brand.delete({ where: { id: req.params.id } });
@@ -1433,7 +1473,7 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
     image, images, imageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
     sizeOptions, specifications, keyInfo, certifications, usage, ingredients,
     usageEn, ingredientsEn, supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn,
-    seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+    seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
   } = req.body;
   try {
     const cleanTitle = normalizeString(title, 300);
@@ -1446,7 +1486,7 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
         title: cleanTitle, titleEn, desc, descEn, features, featuresEn, price: cleanPrice, oldPrice, discountType, discountValue, 
         image: cleanImage, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
         sizeOptions, specifications, keyInfo, certifications, usage, usageEn, ingredients, ingredientsEn,
-        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
       }
     });
     // Notify Google Indexing API
@@ -1458,13 +1498,117 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
   }
 });
 
+app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded or invalid file format' });
+  }
+
+  const filePath = req.file.path;
+
+  try {
+    const { execFile } = require('child_process');
+    const pythonScript = path.join(__dirname, 'src', 'utils', 'parse_excel.py');
+
+    // Run the Python script to parse the Excel file
+    execFile('python', [pythonScript, filePath], async (error, stdout, stderr) => {
+      // Clean up the uploaded file
+      try {
+        fs.unlinkSync(filePath);
+      } catch (unlinkErr) {
+        console.error('Failed to delete uploaded temp file:', unlinkErr);
+      }
+
+      if (error) {
+        console.error('Python execution error:', error, stderr);
+        return res.status(500).json({ error: `Failed to parse Excel file: ${stderr || error.message}` });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed.error) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        // Upsert the default category "فيتامينات ومعادن"
+        const category = await prisma.category.upsert({
+          where: { name: "فيتامينات ومعادن" },
+          update: {},
+          create: { name: "فيتامينات ومعادن", nameEn: "Vitamins & Minerals" }
+        });
+
+        let importedCount = 0;
+        let updatedCount = 0;
+
+        // Process products sequentially
+        for (const item of parsed) {
+          const brandName = (item.brand || "Other").trim();
+          
+          // Find or create the brand
+          const brand = await prisma.brand.upsert({
+            where: { name: brandName },
+            update: {},
+            create: { name: brandName }
+          });
+
+          // Check if product with this title exists
+          const existingProduct = await prisma.product.findFirst({
+            where: { title: item.title }
+          });
+
+          if (existingProduct) {
+            await prisma.product.update({
+              where: { id: existingProduct.id },
+              data: {
+                price: item.price !== null ? item.price : existingProduct.price,
+                expiryDate: item.expiryDate || existingProduct.expiryDate,
+                categoryId: category.id,
+                brandId: brand.id
+              }
+            });
+            updatedCount++;
+          } else {
+            const product = await prisma.product.create({
+              data: {
+                title: item.title,
+                price: item.price !== null ? item.price : 0,
+                expiryDate: item.expiryDate,
+                image: 'https://placehold.co/400x400?text=No+Image',
+                categoryId: category.id,
+                brandId: brand.id
+              }
+            });
+            // Optional: Notify Google Indexing API for new products
+            notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
+            importedCount++;
+          }
+        }
+
+        res.json({
+          success: true,
+          message: `تم استيراد ${importedCount} منتج جديد وتحديث ${updatedCount} منتج بنجاح.`,
+          importedCount,
+          updatedCount
+        });
+
+      } catch (parseErr) {
+        console.error('Failed to parse Python script output:', parseErr, stdout);
+        res.status(500).json({ error: 'Failed to process Excel data output.' });
+      }
+    });
+
+  } catch (err) {
+    console.error('Import Excel error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
   const { 
     title, titleEn, desc, descEn, features, featuresEn, price, oldPrice, discountType, discountValue, 
     image, images, imageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
     sizeOptions, specifications, keyInfo, certifications, usage, ingredients,
     usageEn, ingredientsEn, supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn,
-    seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+    seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
   } = req.body;
   try {
     const cleanPrice = price !== undefined ? toPositiveNumber(price, 'price') : undefined;
@@ -1475,7 +1619,7 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
         title, titleEn, desc, descEn, features, featuresEn, price: cleanPrice, oldPrice, discountType, discountValue, 
         image, images, imageAlt: cleanImageAlt, imageWidth, imageHeight, sizes, tag, seoKeywords, seoDesc, categoryId, brandId,
         sizeOptions, specifications, keyInfo, certifications, usage, usageEn, ingredients, ingredientsEn,
-        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs
+        supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
       }
     });
     // Notify Google Indexing API

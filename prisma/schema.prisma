@@ -92,6 +92,7 @@ model Product {
   seoDescEn        String?
   dosageCalculator String? // JSON string representing the interactive calculator config
   faqs             String? // JSON string representing array of FAQs [{ question_ar, answer_ar, question_en, answer_en }]
+  expiryDate       String?
 
   @@index([createdAt])
   @@index([categoryId])
