@@ -4,6 +4,8 @@ WORKDIR /app
 
 # Install Chromium and required system dependencies for Puppeteer + wget for healthcheck
 RUN apk add --no-cache \
+    python3 \
+    py3-pip \
     chromium \
     nss \
     freetype \
@@ -22,6 +24,9 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 COPY . .
+
+COPY requirements.txt ./
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Generate Prisma client (PostgreSQL)
 RUN npx prisma generate
