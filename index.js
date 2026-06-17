@@ -1330,6 +1330,134 @@ app.post('/api/brands', adminAuthenticate, async (req, res) => {
   }
 });
 
+app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'اسم الشركة مطلوب' });
+
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || '';
+    if (!geminiKey) return res.status(503).json({ error: 'Gemini API key is not configured' });
+
+    const prompt = `Search the web and find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+
+    const geminiPayload = {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: prompt }]
+        }
+      ],
+      tools: [
+        {
+          google_search: {} // Enable search grounding to get real domain
+        }
+      ]
+    };
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(geminiPayload)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Gemini API returned error:', response.status, errText);
+      return res.status(500).json({ error: 'Failed to communicate with Gemini API' });
+    }
+
+    const data = await response.json();
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    let domain = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
+
+    if (domain === 'notfound' || !domain || domain.length < 4 || !domain.includes('.')) {
+      return res.status(404).json({ error: 'لم يتم العثور على موقع رسمي للشركة' });
+    }
+
+    // Try Clearbit logo, fallback to Google Favicon
+    const logoUrl = `https://logo.clearbit.com/${domain}`;
+    const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+
+    let finalLogo = fallbackUrl;
+    try {
+      const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 5000 });
+      if (checkRes.ok) {
+        finalLogo = logoUrl;
+      }
+    } catch (e) {
+      console.warn('Failed to verify Clearbit logo, using fallback favicon:', e.message);
+    }
+
+    res.json({ domain, logoUrl: finalLogo });
+  } catch (error) {
+    console.error('Error auto-finding brand logo:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, res) => {
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || '';
+    if (!geminiKey) return res.status(503).json({ error: 'Gemini API key is not configured' });
+
+    // Fetch all brands
+    const brands = await prisma.brand.findMany();
+    let updatedCount = 0;
+
+    for (const brand of brands) {
+      // Only find logo if they don't have a valid logo or are using a placeholder
+      const hasPlaceholder = !brand.image || brand.image.includes('placehold.co') || brand.image === '';
+      if (hasPlaceholder) {
+        try {
+          const prompt = `Search the web and find the official website domain of the dietary supplement, health, or vitamin brand named "${brand.name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+
+          const geminiPayload = {
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            tools: [{ google_search: {} }]
+          };
+
+          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(geminiPayload)
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const domain = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
+
+            if (domain && domain !== 'notfound' && domain.length >= 4 && domain.includes('.')) {
+              const logoUrl = `https://logo.clearbit.com/${domain}`;
+              const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+              let finalLogo = fallbackUrl;
+              try {
+                const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 3000 });
+                if (checkRes.ok) finalLogo = logoUrl;
+              } catch (e) {}
+
+              await prisma.brand.update({
+                where: { id: brand.id },
+                data: { image: finalLogo }
+              });
+              updatedCount++;
+            }
+          }
+        } catch (err) {
+          console.warn(`Failed to auto-find logo for brand ${brand.name}:`, err.message);
+        }
+      }
+    }
+
+    res.json({ message: `Successfully updated ${updatedCount} brand logos.`, updatedCount });
+  } catch (error) {
+    console.error('Error auto-finding all brand logos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/brands/:id', async (req, res) => {
   try {
     res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
@@ -1932,7 +2060,12 @@ app.get('/api/orders/track/:orderNumber', async (req, res) => {
     const phone = normalizeString(req.query.phone, 40);
     if (!phone) return res.status(400).json({ error: 'رقم الهاتف مطلوب لتتبع الطلب' });
     const orders = await prisma.order.findMany({
-      where: { orderNumber, customerPhone: phone },
+      where: { 
+        orderNumber, 
+        customerPhone: {
+          contains: phone
+        }
+      },
       include: { items: true },
       take: 1
     });
@@ -1969,7 +2102,7 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
   try {
     if (!Array.isArray(items) || items.length === 0 || items.length > 50) return res.status(400).json({ error: 'سلة المنتجات غير صالحة' });
     const cleanCustomerName = normalizeString(customerName, 120);
-    const cleanCustomerPhone = normalizeString(customerPhone, 40);
+    const cleanCustomerPhone = normalizeString(customerPhone, 80);
     const cleanGovernorate = normalizeString(governorate, 80);
     const cleanDistrict = normalizeString(district, 120);
     const cleanAddress = normalizeString(address, 500);

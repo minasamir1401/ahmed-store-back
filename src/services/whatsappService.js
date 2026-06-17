@@ -134,8 +134,20 @@ async function sendWhatsAppMessage(phone, message) {
     return false;
   }
   try {
+    // If phone contains multiple numbers (e.g. separated by hyphen, slash, comma, or space), take the first one
+    let singlePhone = phone;
+    if (typeof phone === 'string') {
+      const parts = phone.split(/[\s,/\-;_]+/);
+      if (parts.length > 0) {
+        const validPart = parts.find(p => p.replace(/\D/g, '').length >= 10);
+        if (validPart) {
+          singlePhone = validPart;
+        }
+      }
+    }
+
     // Convert Arabic numerals to English numerals
-    let cleaned = convertArabicNums(phone);
+    let cleaned = convertArabicNums(singlePhone);
 
     // Clean phone number from any spaces, plus signs, brackets or text
     let formattedPhone = cleaned.replace(/\D/g, '');
