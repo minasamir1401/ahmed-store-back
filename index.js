@@ -1332,48 +1332,61 @@ app.post('/api/brands', adminAuthenticate, async (req, res) => {
 
 app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) => {
   const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'اسم الشركة مطلوب' });
+  if (!name) return res.status(400).json({ error: 'اسم الماركة مطلوب' });
 
   try {
-    const geminiKey = process.env.GEMINI_API_KEY || '';
-    if (!geminiKey) return res.status(503).json({ error: 'Gemini API key is not configured' });
+    const apiKey = process.env.OPENROUTER_API_KEY || '';
+    if (!apiKey) return res.status(503).json({ error: 'OpenRouter API key is not configured' });
 
-    const prompt = `Search the web and find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+    const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
 
-    const geminiPayload = {
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: prompt }]
+    const modelsToTry = [
+      "google/gemini-2.5-flash",
+      "google/gemini-2.5-flash:free",
+      "meta-llama/llama-3.1-8b-instruct:free",
+      "meta-llama/llama-3.1-8b-instruct"
+    ];
+
+    let domain = '';
+    let success = false;
+    let lastError = null;
+
+    for (const model of modelsToTry) {
+      try {
+        console.log(`[OpenRouter] Trying model ${model} for logo search...`);
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [{ role: "user", content: prompt }]
+          })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const text = data.choices?.[0]?.message?.content || '';
+          const cleaned = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
+          if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+            domain = cleaned;
+            success = true;
+            break;
+          }
+        } else {
+          const errText = await response.text();
+          throw new Error(`Status ${response.status}: ${errText}`);
         }
-      ],
-      tools: [
-        {
-          google_search: {} // Enable search grounding to get real domain
-        }
-      ]
-    };
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(geminiPayload)
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('Gemini API returned error:', response.status, errText);
-      return res.status(500).json({ error: 'Failed to communicate with Gemini API' });
+      } catch (err) {
+        console.warn(`[OpenRouter] Model ${model} failed:`, err.message);
+        lastError = err;
+      }
     }
 
-    const data = await response.json();
-    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    let domain = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
-
-    if (domain === 'notfound' || !domain || domain.length < 4 || !domain.includes('.')) {
-      return res.status(404).json({ error: 'لم يتم العثور على موقع رسمي للشركة' });
+    if (!success || !domain) {
+      return res.status(404).json({ error: 'لم يتم العثور على موقع رسمي للماركة' });
     }
 
     // Try Clearbit logo, fallback to Google Favicon
@@ -1399,51 +1412,72 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
 
 app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, res) => {
   try {
-    const geminiKey = process.env.GEMINI_API_KEY || '';
-    if (!geminiKey) return res.status(503).json({ error: 'Gemini API key is not configured' });
+    const apiKey = process.env.OPENROUTER_API_KEY || '';
+    if (!apiKey) return res.status(503).json({ error: 'OpenRouter API key is not configured' });
 
     // Fetch all brands
     const brands = await prisma.brand.findMany();
     let updatedCount = 0;
+
+    const modelsToTry = [
+      "google/gemini-2.5-flash",
+      "google/gemini-2.5-flash:free",
+      "meta-llama/llama-3.1-8b-instruct:free"
+    ];
 
     for (const brand of brands) {
       // Only find logo if they don't have a valid logo or are using a placeholder
       const hasPlaceholder = !brand.image || brand.image.includes('placehold.co') || brand.image === '';
       if (hasPlaceholder) {
         try {
-          const prompt = `Search the web and find the official website domain of the dietary supplement, health, or vitamin brand named "${brand.name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+          const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${brand.name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
 
-          const geminiPayload = {
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            tools: [{ google_search: {} }]
-          };
+          let domain = '';
+          let success = false;
 
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(geminiPayload)
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            const domain = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
-
-            if (domain && domain !== 'notfound' && domain.length >= 4 && domain.includes('.')) {
-              const logoUrl = `https://logo.clearbit.com/${domain}`;
-              const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
-              let finalLogo = fallbackUrl;
-              try {
-                const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 3000 });
-                if (checkRes.ok) finalLogo = logoUrl;
-              } catch (e) {}
-
-              await prisma.brand.update({
-                where: { id: brand.id },
-                data: { image: finalLogo }
+          for (const model of modelsToTry) {
+            try {
+              const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${apiKey}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  model: model,
+                  messages: [{ role: "user", content: prompt }]
+                })
               });
-              updatedCount++;
+
+              if (response.ok) {
+                const data = await response.json();
+                const text = data.choices?.[0]?.message?.content || '';
+                const cleaned = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
+                if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+                  domain = cleaned;
+                  success = true;
+                  break;
+                }
+              }
+            } catch (err) {
+              console.warn(`[OpenRouter Bulk] Model ${model} failed for ${brand.name}:`, err.message);
             }
+          }
+
+          if (success && domain) {
+            const logoUrl = `https://logo.clearbit.com/${domain}`;
+            const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+            let finalLogo = fallbackUrl;
+            try {
+              const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 3000 });
+              if (checkRes.ok) finalLogo = logoUrl;
+            } catch (e) {}
+
+            await prisma.brand.update({
+              where: { id: brand.id },
+              data: { image: finalLogo }
+            });
+            updatedCount++;
           }
         } catch (err) {
           console.warn(`Failed to auto-find logo for brand ${brand.name}:`, err.message);
