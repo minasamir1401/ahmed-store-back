@@ -534,6 +534,186 @@ function generateMockFAQs(productTitle) {
   return JSON.stringify(faqs);
 }
 
+// Reusable SEO generator with OpenRouter Free Model
+async function generateAndSaveProductSEO(productId) {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      include: { brand: true, category: true }
+    });
+
+    if (!product) {
+      console.log(`[SEO Background Worker] Product ${productId} not found.`);
+      return;
+    }
+
+    // Only update if it doesn't already have detailed descriptions
+    const hasDetailedDesc = product.desc && product.desc.length > 200;
+    if (hasDetailedDesc) {
+      console.log(`[SEO Background Worker] Product ${product.title} already has detailed description. Skipping.`);
+      return;
+    }
+
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      console.log(`[SEO Background Worker] OPENROUTER_API_KEY is not defined. Skipping.`);
+      return;
+    }
+
+    const brandName = product.brand?.name || 'The VitaHub';
+    const categoryName = product.category?.name || 'فيتامينات ومكملات';
+
+    console.log(`[SEO Background Worker] Generating SEO content for: "${product.title}" (${brandName})...`);
+
+    const prompt = `You are an expert SEO copywriter and clinical pharmacist specialized in health, nutrition, fitness, and dietary supplements in Egypt.
+Your task is to generate complete, high-quality, professional, and detailed bilingual (Arabic and English) content for the following product:
+- Product Title: ${product.title}
+- Brand: ${brandName}
+- Category: ${categoryName}
+
+You MUST return a valid JSON object ONLY. Do not include any conversational explanation, markdown styling outside the json block, or formatting. The JSON object must have exactly the following structure:
+{
+  "desc": "A detailed Arabic description of the product. It must be scientifically accurate, highly engaging for customers, and exceed 250 words. It must naturally integrate relevant SEO keywords like 'مكملات غذائية', 'فيتامينات', and product-specific terms. Discuss the product purpose, benefits, why to buy it, and why The VitaHub is the best seller.",
+  "descEn": "A detailed English description of the product. It must exceed 250 words and naturally integrate SEO keywords like 'dietary supplements', 'vitamins', and product-specific terms. Discuss product purpose, benefits, and quality.",
+  "usage": "Clear, detailed step-by-step instructions in Arabic on how to use the product, recommended daily dosage, and best time of day to consume.",
+  "usageEn": "Clear, detailed step-by-step instructions in English on how to use the product, recommended daily dosage, and best time of day.",
+  "ingredients": "A complete list of active and inactive ingredients in Arabic (e.g. المكونات النشطة والمكونات الأخرى).",
+  "ingredientsEn": "A complete list of active and inactive ingredients in English.",
+  "warnings": "Important medical warnings, side effects, precautions, and contraindications in Arabic (e.g., consult doctor if pregnant, keep out of reach of children).",
+  "warningsEn": "Important medical warnings, side effects, precautions, and contraindications in English.",
+  "seoKeywords": "A comma-separated string of 10-15 highly relevant Arabic search keywords (e.g., مكملات غذائية, فيتامينات, أوميجا 3, ...).",
+  "seoKeywordsEn": "A comma-separated string of 10-15 highly relevant English search keywords (e.g., dietary supplements, vitamins, omega 3, ...).",
+  "seoDesc": "A brief, compelling Meta Description in Arabic for SEO (max 155 characters) summarizing the product and urging users to buy.",
+  "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters) summarizing the product.",
+  "faqs": [
+    {
+      "question_ar": "Frequently asked question 1 in Arabic?",
+      "answer_ar": "Detailed professional answer in Arabic.",
+      "question_en": "Frequently asked question 1 in English?",
+      "answer_en": "Detailed professional answer in English."
+    },
+    {
+      "question_ar": "Frequently asked question 2 in Arabic?",
+      "answer_ar": "Detailed professional answer in Arabic.",
+      "question_en": "Frequently asked question 2 in English?",
+      "answer_en": "Detailed professional answer in English."
+    },
+    {
+      "question_ar": "Frequently asked question 3 in Arabic?",
+      "answer_ar": "Detailed professional answer in Arabic.",
+      "question_en": "Frequently asked question 3 in English?",
+      "answer_en": "Detailed professional answer in English."
+    }
+  ]
+}
+
+Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://the-vitahub.com',
+        'X-Title': 'The VitaHub Auto SEO'
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash:free',
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        response_format: { type: 'json_object' }
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter status ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const rawContent = data.choices?.[0]?.message?.content;
+    if (!rawContent) {
+      throw new Error('OpenRouter returned empty choices.');
+    }
+
+    const cleaned = rawContent
+      .trim()
+      .replace(/^```json/i, '')
+      .replace(/^```/, '')
+      .replace(/```$/, '')
+      .trim();
+      
+    const seoData = JSON.parse(cleaned);
+
+    await prisma.product.update({
+      where: { id: productId },
+      data: {
+        desc: seoData.desc || product.desc,
+        descEn: seoData.descEn || product.descEn,
+        usage: seoData.usage || product.usage,
+        usageEn: seoData.usageEn || product.usageEn,
+        ingredients: seoData.ingredients || product.ingredients,
+        ingredientsEn: seoData.ingredientsEn || product.ingredientsEn,
+        warnings: seoData.warnings || product.warnings,
+        warningsEn: seoData.warningsEn || product.warningsEn,
+        seoKeywords: seoData.seoKeywords || product.seoKeywords,
+        seoKeywordsEn: seoData.seoKeywordsEn || product.seoKeywordsEn,
+        seoDesc: seoData.seoDesc || product.seoDesc,
+        seoDescEn: seoData.seoDescEn || product.seoDescEn,
+        faqs: typeof seoData.faqs === 'object' ? JSON.stringify(seoData.faqs) : seoData.faqs || product.faqs
+      }
+    });
+
+    console.log(`[SEO Background Worker] Successfully updated product ${productId} SEO content.`);
+
+  } catch (error) {
+    console.error(`[SEO Background Worker] Error updating product ${productId}:`, error.message);
+    throw error;
+  }
+}
+
+const seoQueue = [];
+let seoQueueProcessing = false;
+
+function addToSeoQueue(productId) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    console.log(`[SEO Queue] Skip adding product ${productId} because OPENROUTER_API_KEY is not configured.`);
+    return;
+  }
+  if (!seoQueue.includes(productId)) {
+    seoQueue.push(productId);
+    console.log(`[SEO Queue] Added product ID ${productId} to SEO generation queue. Queue length: ${seoQueue.length}`);
+  }
+  triggerSeoQueueProcessing();
+}
+
+function triggerSeoQueueProcessing() {
+  if (seoQueueProcessing) return;
+  seoQueueProcessing = true;
+  
+  (async () => {
+    while (seoQueue.length > 0) {
+      const productId = seoQueue.shift();
+      try {
+        console.log(`[SEO Queue] Processing product ${productId} (${seoQueue.length} remaining)...`);
+        await generateAndSaveProductSEO(productId);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } catch (err) {
+        console.error(`[SEO Queue] Failed to process product ${productId}:`, err.message);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+    seoQueueProcessing = false;
+    console.log(`[SEO Queue] Finished processing all products in queue.`);
+  })();
+}
+
+
 app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) => {
   const systemMessage = req.body.messages?.find(m => m.role === 'system')?.content || '';
   const isFAQRequest = systemMessage.includes('الأسئلة الشائعة') || systemMessage.includes('FAQs');
@@ -1653,6 +1833,12 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
     });
     // Notify Google Indexing API
     notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
+    
+    // Trigger background SEO queue if description is missing or very short
+    if (!desc || desc.trim().length < 100) {
+      addToSeoQueue(product.id);
+    }
+
     res.status(201).json(product);
   } catch (error) {
     console.error('POST /api/products error:', error);
@@ -1728,6 +1914,10 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
               }
             });
             updatedCount++;
+            // Trigger background SEO if the existing product lacks description details
+            if (!existingProduct.desc || existingProduct.desc.trim().length < 100) {
+              addToSeoQueue(existingProduct.id);
+            }
           } else {
             const product = await prisma.product.create({
               data: {
@@ -1742,6 +1932,8 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
             // Optional: Notify Google Indexing API for new products
             notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
             importedCount++;
+            // Trigger background SEO for the newly created product
+            addToSeoQueue(product.id);
           }
         }
 
