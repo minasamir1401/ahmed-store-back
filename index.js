@@ -583,18 +583,18 @@ async function generateAndSaveProductSEO(productId, force = false) {
 - الماركة: ${brandName}
 - القسم: ${categoryName}
 
-يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
+يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown وبدقة علمية تامة. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
 {
-  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 250 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
-  "descEn": "Detailed professional description in English exceeding 250 words naturally integrating SEO keywords.",
+  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 100 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
+  "descEn": "Detailed professional description in English exceeding 100 words naturally integrating SEO keywords.",
   "usage": "طريقة الاستخدام والجرعات الموصى بها بالتفصيل باللغة العربية.",
   "usageEn": "Detailed usage and dosage instructions in English.",
   "ingredients": "المكونات بالتفصيل باللغة العربية.",
   "ingredientsEn": "Detailed ingredients list in English.",
   "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
   "warningsEn": "Medical warnings and precautions in English.",
-  "seoKeywords": "بالضبط 250 كلمة أو عبارة بحث مفتاحية متنوعة بالعربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ...).",
-  "seoKeywordsEn": "Exactly 250 highly relevant meta keywords and search queries in English separated by commas.",
+  "seoKeywords": "بين 15 إلى 20 كلمة أو عبارة بحث مفتاحية متنوعة بالعربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ...).",
+  "seoKeywordsEn": "Between 15 to 20 highly relevant meta keywords and search queries in English separated by commas.",
   "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
   "seoDescEn": "Meta description in English for Google search (150-220 characters).",
   "faqs": [
@@ -619,7 +619,7 @@ async function generateAndSaveProductSEO(productId, force = false) {
   ]
 }
 
-تأكد من أن الوصف العربي يتجاوز 250 كلمة، وأن حقل seoKeywords يحتوي على بالضبط 250 كلمة مفتاحية باللغة العربية.`;
+تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على بين 15 إلى 20 كلمة مفتاحية باللغة العربية.`;
 
     let lastError = null;
     let responseData = null;
@@ -642,6 +642,7 @@ async function generateAndSaveProductSEO(productId, force = false) {
             model: modelName,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.3,
+            max_tokens: 1200,
             response_format: { type: 'json_object' }
           })
         });

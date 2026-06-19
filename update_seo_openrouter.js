@@ -49,49 +49,49 @@ async function generateSeoForProduct(product) {
 
   console.log(`\n🤖 Calling OpenRouter to generate SEO for: "${product.title}" (${brandName})...`);
 
-  const prompt = `You are an expert SEO copywriter and clinical pharmacist specialized in health, nutrition, fitness, and dietary supplements in Egypt.
-Your task is to generate complete, high-quality, professional, and detailed bilingual (Arabic and English) content for the following product:
-- Product Title: ${product.title}
-- Brand: ${brandName}
-- Category: ${categoryName}
+  const prompt = `أنت خبير محتوى محترف وعالم صيدلة سريرية متخصص في المكملات والمنتجات الصحية في مصر.
+مهمتك هي كتابة محتوى متكامل، غني وعالي الجودة، ومتوافق تماماً مع محركات البحث (SEO) باللغتين العربية والإنجليزية لمنتج مكمل غذائي.
+- اسم المنتج: ${product.title}
+- الماركة: ${brandName}
+- القسم: ${categoryName}
 
-You MUST return a valid JSON object ONLY. Do not include any conversational explanation, markdown styling outside the json block, or formatting. The JSON object must have exactly the following structure:
+يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown وبدقة علمية تامة. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
 {
-  "desc": "A detailed Arabic description of the product. It must be scientifically accurate, highly engaging for customers, and exceed 250 words. It must naturally integrate relevant SEO keywords like 'مكملات غذائية', 'فيتامينات', and product-specific terms. Discuss the product purpose, benefits, why to buy it, and why The VitaHub is the best seller.",
-  "descEn": "A detailed English description of the product. It must exceed 250 words and naturally integrate SEO keywords like 'dietary supplements', 'vitamins', and product-specific terms. Discuss product purpose, benefits, and quality.",
-  "usage": "Clear, detailed step-by-step instructions in Arabic on how to use the product, recommended daily dosage, and best time of day to consume.",
-  "usageEn": "Clear, detailed step-by-step instructions in English on how to use the product, recommended daily dosage, and best time of day.",
-  "ingredients": "A complete list of active and inactive ingredients in Arabic (e.g. المكونات النشطة والمكونات الأخرى).",
-  "ingredientsEn": "A complete list of active and inactive ingredients in English.",
-  "warnings": "Important medical warnings, side effects, precautions, and contraindications in Arabic (e.g., consult doctor if pregnant, keep out of reach of children).",
-  "warningsEn": "Important medical warnings, side effects, precautions, and contraindications in English.",
-  "seoKeywords": "A comma-separated string of 10-15 highly relevant Arabic search keywords (e.g., مكملات غذائية, فيتامينات, أوميجا 3, ...).",
-  "seoKeywordsEn": "A comma-separated string of 10-15 highly relevant English search keywords (e.g., dietary supplements, vitamins, omega 3, ...).",
-  "seoDesc": "A brief, compelling Meta Description in Arabic for SEO (max 155 characters) summarizing the product and urging users to buy.",
-  "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters) summarizing the product.",
+  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 100 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
+  "descEn": "Detailed professional description in English exceeding 100 words naturally integrating SEO keywords.",
+  "usage": "طريقة الاستخدام والجرعات الموصى بها بالتفصيل باللغة العربية.",
+  "usageEn": "Detailed usage and dosage instructions in English.",
+  "ingredients": "المكونات بالتفصيل باللغة العربية.",
+  "ingredientsEn": "Detailed ingredients list in English.",
+  "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
+  "warningsEn": "Medical warnings and precautions in English.",
+  "seoKeywords": "سلسلة من الكلمات المفتاحية باللغة العربية مفصولة بفواصل (من 10 إلى 15 كلمة مفتاحية).",
+  "seoKeywordsEn": "A comma-separated string of 10-15 highly relevant English search keywords.",
+  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (حد أقصى 155 حرفاً).",
+  "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters).",
   "faqs": [
     {
-      "question_ar": "Frequently asked question 1 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 1 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 1 بالعربية؟",
+      "answer_ar": "إجابة احترافية 1 بالعربية.",
+      "question_en": "Question 1 in English?",
+      "answer_en": "Professional answer 1 in English."
     },
     {
-      "question_ar": "Frequently asked question 2 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 2 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 2 بالعربية؟",
+      "answer_ar": "إجابة احترافية 2 بالعربية.",
+      "question_en": "Question 2 in English?",
+      "answer_en": "Professional answer 2 in English."
     },
     {
-      "question_ar": "Frequently asked question 3 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 3 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 3 بالعربية؟",
+      "answer_ar": "إجابة احترافية 3 بالعربية.",
+      "question_en": "Question 3 in English?",
+      "answer_en": "Professional answer 3 in English."
     }
   ]
 }
 
-Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
+تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن الوصف الإنجليزي يتجاوز 100 كلمة. اتبع المعايير العلمية والطبية الدقيقة. أرجع كائن JSON فقط.`;
 
   let attempts = 0;
   const maxAttempts = FREE_MODELS.length * 3; // Try each model up to 3 times
@@ -118,6 +118,7 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
           }
         ],
         temperature: 0.3,
+        max_tokens: 1200,
         response_format: { type: 'json_object' }
       })
     });
