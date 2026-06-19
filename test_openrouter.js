@@ -2,6 +2,9 @@ require('dotenv').config();
 const apiKey = process.env.OPENROUTER_API_KEY || '';
 
 const models = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen3-next-80b-a3b-instruct:free",
+  "qwen/qwen3-coder:free",
   "google/gemini-2.5-flash",
   "google/gemini-2.5-flash:free",
   "meta-llama/llama-3.1-8b-instruct:free",

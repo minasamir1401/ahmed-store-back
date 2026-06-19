@@ -33,7 +33,7 @@ async function run() {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
+        model: "qwen/qwen3-next-80b-a3b-instruct:free",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 1000
       })

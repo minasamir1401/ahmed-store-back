@@ -45,7 +45,7 @@ const signToken = (user, expiresIn = process.env.JWT_EXPIRES_IN || '2h') => jwt.
 );
 
 const verifyGoogleIdToken = async (credential) => {
-  const googleClientId = process.env.GOOGLE_CLIENT_ID || '147701060089-osbl6sk898kp0bo23fqvdlc8j9c5ncr6.apps.googleusercontent.com';
+  const googleClientId = process.env.GOOGLE_CLIENT_ID || '941750565259-bucmsc2elr7eb72uutmnelf5fmpfiv92.apps.googleusercontent.com';
   if (!googleClientId) {
     const error = new Error('Google sign-in is not configured');
     error.status = 503;
@@ -618,7 +618,7 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
         'X-Title': 'The VitaHub Auto SEO'
       },
       body: JSON.stringify({
-        model: 'openrouter/free',
+        model: 'qwen/qwen3-next-80b-a3b-instruct:free',
         messages: [
           {
             role: 'user',
@@ -863,7 +863,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     delete payload.models;
 
     if (modelsToTry.length === 0) {
-      modelsToTry.push('google/gemma-4-31b-it:free');
+      modelsToTry.push('qwen/qwen3-next-80b-a3b-instruct:free');
     }
 
     let lastError = null;
@@ -1108,7 +1108,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/auth/google-config', authLimiter, (req, res) => {
-  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '147701060089-osbl6sk898kp0bo23fqvdlc8j9c5ncr6.apps.googleusercontent.com' });
+  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '941750565259-bucmsc2elr7eb72uutmnelf5fmpfiv92.apps.googleusercontent.com' });
 });
 
 app.get('/api/auth/test-diagnostic', adminAuthenticate, (req, res) => {

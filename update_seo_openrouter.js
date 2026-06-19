@@ -10,7 +10,7 @@ if (!apiKey) {
 
 // OpenRouter configuration
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'openrouter/free'; // Wildcard free model on OpenRouter that is guaranteed to be available for free
+const MODEL_NAME = 'qwen/qwen3-next-80b-a3b-instruct:free'; // Free Qwen3 Next 80B Instruct model on OpenRouter
 
 // Helper delay function to stay within API rate limits
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,39 +80,62 @@ You MUST return a valid JSON object ONLY. Do not include any conversational expl
 
 Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://the-vitahub.com',
-      'X-Title': 'The VitaHub SEO Updater'
-    },
-    body: JSON.stringify({
-      model: MODEL_NAME,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.3,
-      response_format: { type: 'json_object' }
-    })
-  });
+  let attempts = 0;
+  const maxAttempts = 5;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter API responded with status ${response.status}: ${errorText}`);
+  while (attempts < maxAttempts) {
+    attempts++;
+    const response = await fetch(OPENROUTER_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://the-vitahub.com',
+        'X-Title': 'The VitaHub SEO Updater'
+      },
+      body: JSON.stringify({
+        model: MODEL_NAME,
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        response_format: { type: 'json_object' }
+      })
+    });
+
+    if (response.status === 429) {
+      const errorText = await response.text();
+      console.warn(`⚠️ Received 429 (Rate Limited) from OpenRouter. Attempt ${attempts}/${maxAttempts}.`);
+      let retryAfter = 20; // Default fallback
+      try {
+        const parsedError = JSON.parse(errorText);
+        const sec = parsedError.error?.metadata?.retry_after_seconds || parsedError.error?.metadata?.headers?.['Retry-After'];
+        if (sec) retryAfter = Math.ceil(Number(sec));
+      } catch (e) {}
+      
+      console.log(`Waiting for ${retryAfter + 3} seconds before retrying...`);
+      await delay((retryAfter + 3) * 1000);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API responded with status ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const rawContent = data.choices?.[0]?.message?.content;
+    if (!rawContent) {
+      throw new Error('OpenRouter returned an empty response choices array.');
+    }
+
+    return parseJsonResponse(rawContent);
   }
 
-  const data = await response.json();
-  const rawContent = data.choices?.[0]?.message?.content;
-  if (!rawContent) {
-    throw new Error('OpenRouter returned an empty response choices array.');
-  }
-
-  return parseJsonResponse(rawContent);
+  throw new Error(`Failed to generate SEO after ${maxAttempts} attempts due to rate-limiting.`);
 }
 
 async function main() {
