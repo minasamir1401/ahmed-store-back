@@ -618,7 +618,7 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
         'X-Title': 'The VitaHub Auto SEO'
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash:free',
+        model: 'openrouter/free',
         messages: [
           {
             role: 'user',
