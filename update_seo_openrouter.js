@@ -14,10 +14,10 @@ const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 // Rotating list of free models — fastest/most reliable first.
 // When one model is rate-limited the script automatically tries the next one.
 const FREE_MODELS = [
+  'openai/gpt-oss-120b:free',
+  'openai/gpt-oss-20b:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen-2.5-72b-instruct:free',
-  'deepseek/deepseek-r1:free',
-  'nvidia/nemotron-nano-12b-v2-vl:free'
+  'qwen/qwen3-coder:free'
 ];
 
 // Tracks which model index to use next (module-level so it persists across products)

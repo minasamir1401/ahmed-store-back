@@ -537,15 +537,15 @@ function generateMockFAQs(productTitle) {
 // ── OpenRouter Free Model Rotation ───────────────────────────
 // When one model is rate-limited the helper auto-rotates to the next one.
 const OR_FREE_MODELS = [
+  'openai/gpt-oss-120b:free',
+  'openai/gpt-oss-20b:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen-2.5-72b-instruct:free',
-  'deepseek/deepseek-r1:free',
-  'nvidia/nemotron-nano-12b-v2-vl:free'
+  'qwen/qwen3-coder:free'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
 
-// Reusable SEO generator with OpenRouter Free Model
-async function generateAndSaveProductSEO(productId, force = false) {
+// Reusable SEO generator with OpenRouter or APIFreeLLM
+async function generateAndSaveProductSEO(productId, force = false, provider = 'openrouter') {
   try {
     const product = await prisma.product.findUnique({
       where: { id: productId },
@@ -619,66 +619,109 @@ async function generateAndSaveProductSEO(productId, force = false) {
 
 تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على بين 15 إلى 20 كلمة مفتاحية باللغة العربية.`;
 
-    let lastError = null;
     let responseData = null;
     let success = false;
-    const maxAttempts = OR_FREE_MODELS.length * 2;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const modelName = OR_FREE_MODELS[orModelIndex];
+    if (provider === 'apifree') {
+      const apifreeKey = process.env.APIFREE_API_KEY || 'apf_xsuukak3i8667v8bcj4sx4wf';
+      console.log(`[SEO Generation] Requesting APIFreeLLM for: "${product.title}"...`);
       try {
-        console.log(`[SEO Generation] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        const response = await fetch('https://apifreellm.com/api/v1/chat', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://the-vitahub.com',
-            'X-Title': 'The VitaHub Auto SEO'
+            'Authorization': `Bearer ${apifreeKey}`
           },
           body: JSON.stringify({
-            model: modelName,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.3,
-            max_tokens: 1200,
-            response_format: { type: 'json_object' }
+            message: prompt,
+            model: 'apifreellm'
           })
         });
 
-        if (response.status === 429) {
-          await response.text();
-          console.warn(`[SEO Generation] Model "${modelName}" rate-limited. Switching...`);
-          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, orModelIndex === 0 ? 30000 : 5000));
-          continue;
-        }
-
         if (!response.ok) {
           const errorText = await response.text();
-          console.warn(`[SEO Generation] Model "${modelName}" error ${response.status}. Switching...`);
-          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          continue;
+          throw new Error(`APIFreeLLM returned status ${response.status}: ${errorText}`);
         }
 
-        responseData = await response.json();
-        success = true;
-        break;
-      } catch (err) {
-        console.warn(`[SEO Generation] Attempt ${attempt} failed:`, err.message);
-        lastError = err;
-        orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
-    }
+        const data = await response.json();
+        if (!data.success || !data.response) {
+          throw new Error(data.message || 'APIFreeLLM returned success=false');
+        }
 
-    if (!success) {
-      throw new Error(`Failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
+        responseData = {
+          choices: [
+            {
+              message: {
+                content: data.response
+              }
+            }
+          ]
+        };
+        success = true;
+      } catch (err) {
+        console.error(`[SEO Generation] APIFreeLLM call failed:`, err.message);
+        throw err;
+      }
+    } else {
+      let lastError = null;
+      const maxAttempts = OR_FREE_MODELS.length * 2;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const modelName = OR_FREE_MODELS[orModelIndex];
+        try {
+          console.log(`[SEO Generation] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
+          const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://the-vitahub.com',
+              'X-Title': 'The VitaHub Auto SEO'
+            },
+            body: JSON.stringify({
+              model: modelName,
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.3,
+              max_tokens: 1200,
+              response_format: { type: 'json_object' }
+            })
+          });
+
+          if (response.status === 429) {
+            await response.text();
+            console.warn(`[SEO Generation] Model "${modelName}" rate-limited. Switching...`);
+            orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+            await new Promise(resolve => setTimeout(resolve, orModelIndex === 0 ? 30000 : 5000));
+            continue;
+          }
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.warn(`[SEO Generation] Model "${modelName}" error ${response.status}. Switching...`);
+            orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            continue;
+          }
+
+          responseData = await response.json();
+          success = true;
+          break;
+        } catch (err) {
+          console.warn(`[SEO Generation] Attempt ${attempt} failed:`, err.message);
+          lastError = err;
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+      }
+
+      if (!success) {
+        throw new Error(`Failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
+      }
     }
 
     const rawContent = responseData.choices?.[0]?.message?.content;
     if (!rawContent) {
-      throw new Error('OpenRouter returned empty choices.');
+      throw new Error('OpenRouter/APIFreeLLM returned empty choices.');
     }
 
     const cleaned = rawContent
@@ -750,7 +793,8 @@ function triggerSeoQueueProcessing() {
 
 app.post('/api/admin/products/:id/generate-seo', adminAuthenticate, async (req, res) => {
   try {
-    const result = await generateAndSaveProductSEO(req.params.id, true);
+    const provider = req.body.provider || 'openrouter';
+    const result = await generateAndSaveProductSEO(req.params.id, true, provider);
     res.json(result);
   } catch (error) {
     console.error('Manual SEO Generation Error:', error);
@@ -891,6 +935,68 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     }
   }
   */
+
+  // Support APIFreeLLM directly
+  const apifreeKey = process.env.APIFREE_API_KEY || 'apf_xsuukak3i8667v8bcj4sx4wf';
+  if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
+    try {
+      const messages = req.body.messages || [];
+      const sysMsg = messages.find(m => m.role === 'system')?.content || '';
+      const userMsg = messages.find(m => m.role === 'user')?.content || '';
+      let prompt = '';
+      if (sysMsg) {
+        prompt += `${sysMsg}\n\n`;
+      }
+      prompt += userMsg;
+
+      console.log('[APIFreeLLM] Generating content using APIFreeLLM...');
+      const response = await fetch('https://apifreellm.com/api/v1/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apifreeKey}`
+        },
+        body: JSON.stringify({
+          message: prompt,
+          model: 'apifreellm'
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.response) {
+          return res.json({
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: data.response
+                }
+              }
+            ]
+          });
+        } else {
+          console.warn('APIFreeLLM API returned failure:', data);
+          throw new Error(data.message || 'APIFreeLLM returned success=false');
+        }
+      } else {
+        const errText = await response.text();
+        console.warn('APIFreeLLM API returned error status:', response.status, errText);
+        throw new Error(`APIFreeLLM API returned status ${response.status}`);
+      }
+    } catch (err) {
+      console.error('[APIFreeLLM call failed]', err);
+      if (isFAQRequest) {
+        return fallbackHandler();
+      }
+      return res.status(502).json({ 
+        error: { 
+          message: "فشل الاتصال بـ APIFreeLLM: " + err.message,
+          details: err.message
+        } 
+      });
+    }
+  }
 
   try {
     const apiKey = process.env.OPENROUTER_API_KEY || '';
