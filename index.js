@@ -534,6 +534,18 @@ function generateMockFAQs(productTitle) {
   return JSON.stringify(faqs);
 }
 
+// ── OpenRouter Free Model Rotation ───────────────────────────
+// When one model is rate-limited the helper auto-rotates to the next one.
+const OR_FREE_MODELS = [
+  'meta-llama/llama-3.3-70b-instruct:free',   // Most reliable, fast
+  'openai/gpt-oss-120b:free',                  // GPT-quality, new
+  'nvidia/nemotron-3-super-120b-a12b:free',    // 1M context
+  'nvidia/nemotron-nano-12b-v2-vl:free',       // Fast & lightweight
+  'google/gemma-4-31b-it:free',                // Google Gemma
+  'qwen/qwen3-next-80b-a3b-instruct:free',     // Fallback
+];
+let orModelIndex = 0; // Shared rotation index across all callers
+
 // Reusable SEO generator with OpenRouter Free Model
 async function generateAndSaveProductSEO(productId, force = false) {
   try {
@@ -612,11 +624,12 @@ async function generateAndSaveProductSEO(productId, force = false) {
     let lastError = null;
     let responseData = null;
     let success = false;
-    const maxAttempts = 5;
+    const maxAttempts = OR_FREE_MODELS.length * 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const modelName = OR_FREE_MODELS[orModelIndex];
       try {
-        console.log(`[SEO Generation] Requesting OpenRouter (Attempt ${attempt}/${maxAttempts})...`);
+        console.log(`[SEO Generation] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -626,42 +639,27 @@ async function generateAndSaveProductSEO(productId, force = false) {
             'X-Title': 'The VitaHub Auto SEO'
           },
           body: JSON.stringify({
-            model: 'qwen/qwen3-next-80b-a3b-instruct:free',
-            messages: [
-              {
-                role: 'user',
-                content: prompt
-              }
-            ],
+            model: modelName,
+            messages: [{ role: 'user', content: prompt }],
             temperature: 0.3,
             response_format: { type: 'json_object' }
           })
         });
 
         if (response.status === 429) {
-          const errorText = await response.text();
-          let retryAfter = 10;
-          try {
-            const parsedError = JSON.parse(errorText);
-            const sec = parsedError.metadata?.retry_after_seconds || 
-                        parsedError.metadata?.headers?.['Retry-After'] ||
-                        parsedError.error?.metadata?.retry_after_seconds ||
-                        parsedError.error?.metadata?.headers?.['Retry-After'];
-            if (sec) retryAfter = Math.ceil(Number(sec));
-          } catch (e) {}
-          
-          if (attempt < maxAttempts) {
-            const delaySec = Math.max(retryAfter, 10) + (attempt * 5);
-            console.warn(`[SEO Generation] 429 Rate Limit. Retrying in ${delaySec} seconds...`);
-            await new Promise(resolve => setTimeout(resolve, delaySec * 1000));
-            continue;
-          }
-          throw new Error(`OpenRouter 429 Rate Limit: ${errorText}`);
+          await response.text();
+          console.warn(`[SEO Generation] Model "${modelName}" rate-limited. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, orModelIndex === 0 ? 30000 : 5000));
+          continue;
         }
 
         if (!response.ok) {
           const errorText = await response.text();
-          throw new Error(`OpenRouter status ${response.status}: ${errorText}`);
+          console.warn(`[SEO Generation] Model "${modelName}" error ${response.status}. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
         }
 
         responseData = await response.json();
@@ -670,9 +668,8 @@ async function generateAndSaveProductSEO(productId, force = false) {
       } catch (err) {
         console.warn(`[SEO Generation] Attempt ${attempt} failed:`, err.message);
         lastError = err;
-        if (attempt < maxAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-        }
+        orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
@@ -903,8 +900,8 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     delete payload.apiKey;
     delete payload.provider;
 
-    // Use a single free model from OpenRouter as requested by the user
-    const modelName = payload.model || 'qwen/qwen3-next-80b-a3b-instruct:free';
+    // Rotate through free models on rate-limit
+    const modelName = payload.model || OR_FREE_MODELS[orModelIndex];
     payload.model = modelName;
     delete payload.models;
 
@@ -912,11 +909,14 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     let responseData = null;
     let success = false;
     let lastStatus = 503;
-    const maxAttempts = 3;
+    const maxAttempts = OR_FREE_MODELS.length;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const currentModel = OR_FREE_MODELS[orModelIndex];
+      // If user explicitly sent a model, honor it on first attempt only
+      payload.model = (attempt === 1 && modelName !== OR_FREE_MODELS[0]) ? modelName : currentModel;
       try {
-        console.log(`[OpenRouter] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})`);
+        console.log(`[OpenRouter] Requesting model: ${payload.model} (Attempt ${attempt}/${maxAttempts})`);
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -929,46 +929,38 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
         lastStatus = response.status;
 
         if (response.status === 429) {
-          const errorText = await response.text();
-          let retryAfter = 5;
-          try {
-            const parsedError = JSON.parse(errorText);
-            const sec = parsedError.metadata?.retry_after_seconds || 
-                        parsedError.metadata?.headers?.['Retry-After'] ||
-                        parsedError.error?.metadata?.retry_after_seconds ||
-                        parsedError.error?.metadata?.headers?.['Retry-After'];
-            if (sec) retryAfter = Math.ceil(Number(sec));
-          } catch (e) {}
-          
-          if (attempt < maxAttempts) {
-            const delaySec = Math.max(retryAfter, 5) + (attempt * 2);
-            console.warn(`[OpenRouter] 429 Rate Limit. Retrying in ${delaySec} seconds...`);
-            await new Promise(resolve => setTimeout(resolve, delaySec * 1000));
-            continue;
-          }
-          throw new Error(`OpenRouter 429 Rate Limit: ${errorText}`);
+          await response.text();
+          console.warn(`[OpenRouter] Model "${payload.model}" rate-limited. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
         }
 
         const contentType = response.headers.get("content-type");
         if (!contentType || !contentType.includes("application/json")) {
           const textError = await response.text();
-          throw new Error(`Non-JSON response (${response.status}): ${textError}`);
+          console.warn(`[OpenRouter] Non-JSON from "${payload.model}". Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
         }
 
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(`API returned error (${response.status}): ${JSON.stringify(data)}`);
+          console.warn(`[OpenRouter] Error ${response.status} from "${payload.model}". Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
         }
 
         responseData = data;
         success = true;
-        break; // Success! Exit the loop.
+        break;
       } catch (err) {
         console.warn(`[OpenRouter] Attempt ${attempt} failed:`, err.message);
         lastError = err;
-        if (attempt < maxAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
+        orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
@@ -1050,7 +1042,7 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3-next-80b-a3b-instruct:free',
+        model: OR_FREE_MODELS[orModelIndex],
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: userMessage }
@@ -1059,6 +1051,10 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
     });
 
     const data = await response.json();
+    if (response.status === 429) {
+      orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+      return res.status(429).json({ error: 'Rate limited, please retry shortly.' });
+    }
     if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'AI request failed' });
     return res.json({ advice: data.choices?.[0]?.message?.content || '' });
   } catch (error) {
