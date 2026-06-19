@@ -10,7 +10,20 @@ if (!apiKey) {
 
 // OpenRouter configuration
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'qwen/qwen3-next-80b-a3b-instruct:free'; // Free Qwen3 Next 80B Instruct model on OpenRouter
+
+// Rotating list of free models — fastest/most reliable first.
+// When one model is rate-limited the script automatically tries the next one.
+const FREE_MODELS = [
+  'meta-llama/llama-3.3-70b-instruct:free',   // Most reliable, fast
+  'openai/gpt-oss-120b:free',                  // GPT-quality, new
+  'nvidia/nemotron-3-super-120b-a12b:free',    // 1M context
+  'nvidia/nemotron-nano-12b-v2-vl:free',       // Fast & lightweight
+  'google/gemma-4-31b-it:free',                // Google Gemma
+  'qwen/qwen3-next-80b-a3b-instruct:free',     // Original (kept as fallback)
+];
+
+// Tracks which model index to use next (module-level so it persists across products)
+let currentModelIndex = 0;
 
 // Helper delay function to stay within API rate limits
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,10 +94,13 @@ You MUST return a valid JSON object ONLY. Do not include any conversational expl
 Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
 
   let attempts = 0;
-  const maxAttempts = 10;
+  const maxAttempts = FREE_MODELS.length * 3; // Try each model up to 3 times
 
   while (attempts < maxAttempts) {
     attempts++;
+    const modelName = FREE_MODELS[currentModelIndex];
+    console.log(`  🔄 Using model: ${modelName} (attempt ${attempts}/${maxAttempts})`);
+
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
       headers: {
@@ -94,7 +110,7 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
         'X-Title': 'The VitaHub SEO Updater'
       },
       body: JSON.stringify({
-        model: MODEL_NAME,
+        model: modelName,
         messages: [
           {
             role: 'user',
@@ -108,39 +124,45 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
 
     if (response.status === 429) {
       const errorText = await response.text();
-      console.warn(`⚠️ Received 429 (Rate Limited) from OpenRouter. Attempt ${attempts}/${maxAttempts}.`);
-      let retryAfter = 20; // Default fallback
-      try {
-        const parsedError = JSON.parse(errorText);
-        // OpenRouter returns metadata either directly or nested under error property
-        const sec = parsedError.metadata?.retry_after_seconds || 
-                    parsedError.metadata?.headers?.['Retry-After'] ||
-                    parsedError.error?.metadata?.retry_after_seconds ||
-                    parsedError.error?.metadata?.headers?.['Retry-After'];
-        if (sec) retryAfter = Math.ceil(Number(sec));
-      } catch (e) {}
+      console.warn(`⚠️ Model "${modelName}" is rate-limited (429). Switching to next model...`);
       
-      const delaySec = Math.max(retryAfter, 20) + (attempts * 10);
-      console.log(`Waiting for ${delaySec} seconds before retrying...`);
-      await delay(delaySec * 1000);
+      // Rotate to next model immediately — no long wait needed
+      currentModelIndex = (currentModelIndex + 1) % FREE_MODELS.length;
+      
+      // If we've cycled through all models, wait before trying again
+      if (currentModelIndex === 0) {
+        console.log('  ⏳ All models rate-limited. Waiting 30s before retrying...');
+        await delay(30000);
+      } else {
+        // Small pause between model switches (5s)
+        await delay(5000);
+      }
       continue;
     }
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`OpenRouter API responded with status ${response.status}: ${errorText}`);
+      console.warn(`⚠️ Model "${modelName}" returned error ${response.status}. Switching to next model...`);
+      currentModelIndex = (currentModelIndex + 1) % FREE_MODELS.length;
+      await delay(3000);
+      continue;
     }
 
     const data = await response.json();
     const rawContent = data.choices?.[0]?.message?.content;
     if (!rawContent) {
-      throw new Error('OpenRouter returned an empty response choices array.');
+      console.warn(`⚠️ Model "${modelName}" returned empty response. Switching to next model...`);
+      currentModelIndex = (currentModelIndex + 1) % FREE_MODELS.length;
+      await delay(3000);
+      continue;
     }
 
+    // Success! Keep using this model for the next product (it's working)
+    console.log(`  ✅ Got response from "${modelName}"`);
     return parseJsonResponse(rawContent);
   }
 
-  throw new Error(`Failed to generate SEO after ${maxAttempts} attempts due to rate-limiting.`);
+  throw new Error(`Failed to generate SEO after ${maxAttempts} attempts across all models.`);
 }
 
 async function main() {
@@ -201,8 +223,8 @@ async function main() {
         console.log(`✅ Successfully updated product SEO inside database!`);
         successCount++;
 
-        // Wait 2 seconds between requests to avoid rate limits
-        await delay(2000);
+        // Wait 1.5 seconds between products
+        await delay(1500);
       } catch (err) {
         console.error(`❌ Failed to update product ${product.id}:`, err.message);
         failCount++;
