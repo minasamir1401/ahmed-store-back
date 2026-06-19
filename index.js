@@ -583,8 +583,8 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
 
 يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown وبدقة علمية تامة. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
 {
-  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 100 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
-  "descEn": "Detailed professional description in English exceeding 100 words naturally integrating SEO keywords.",
+  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 350 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل بالتفصيل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
+  "descEn": "Detailed professional description in English exceeding 350 words naturally integrating SEO keywords.",
   "usage": "طريقة الاستخدام والجرعات الموصى بها بالتفصيل باللغة العربية.",
   "usageEn": "Detailed usage and dosage instructions in English.",
   "ingredients": "المكونات بالتفصيل باللغة العربية.",
