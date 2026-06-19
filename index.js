@@ -718,7 +718,7 @@ app.post('/api/admin/products/:id/generate-seo', adminAuthenticate, async (req, 
   }
 });
 
-app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =>>,StartLine:710,TargetContent: {
+app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) => {
   const systemMessage = req.body.messages?.find(m => m.role === 'system')?.content || '';
   const isFAQRequest = systemMessage.includes('الأسئلة الشائعة') || systemMessage.includes('FAQs');
 
