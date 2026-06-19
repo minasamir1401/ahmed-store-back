@@ -537,12 +537,9 @@ function generateMockFAQs(productTitle) {
 // ── OpenRouter Free Model Rotation ───────────────────────────
 // When one model is rate-limited the helper auto-rotates to the next one.
 const OR_FREE_MODELS = [
-  'meta-llama/llama-3.3-70b-instruct:free',   // Most reliable, fast
-  'openai/gpt-oss-120b:free',                  // GPT-quality, new
-  'nvidia/nemotron-3-super-120b-a12b:free',    // 1M context
-  'nvidia/nemotron-nano-12b-v2-vl:free',       // Fast & lightweight
-  'google/gemma-4-31b-it:free',                // Google Gemma
-  'qwen/qwen3-next-80b-a3b-instruct:free',     // Fallback
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'meta-llama/llama-3.1-8b-instruct:free',
+  'nvidia/nemotron-nano-12b-v2-vl:free'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
 
@@ -1564,8 +1561,7 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
     const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
 
     const modelsToTry = [
-      "google/gemini-2.5-flash",
-      "google/gemini-2.5-flash:free",
+      "meta-llama/llama-3.3-70b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct"
     ];
@@ -1643,8 +1639,7 @@ app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, 
     let updatedCount = 0;
 
     const modelsToTry = [
-      "google/gemini-2.5-flash",
-      "google/gemini-2.5-flash:free",
+      "meta-llama/llama-3.3-70b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct:free"
     ];
 

@@ -14,12 +14,9 @@ const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 // Rotating list of free models — fastest/most reliable first.
 // When one model is rate-limited the script automatically tries the next one.
 const FREE_MODELS = [
-  'meta-llama/llama-3.3-70b-instruct:free',   // Most reliable, fast
-  'openai/gpt-oss-120b:free',                  // GPT-quality, new
-  'nvidia/nemotron-3-super-120b-a12b:free',    // 1M context
-  'nvidia/nemotron-nano-12b-v2-vl:free',       // Fast & lightweight
-  'google/gemma-4-31b-it:free',                // Google Gemma
-  'qwen/qwen3-next-80b-a3b-instruct:free',     // Original (kept as fallback)
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'meta-llama/llama-3.1-8b-instruct:free',
+  'nvidia/nemotron-nano-12b-v2-vl:free'
 ];
 
 // Tracks which model index to use next (module-level so it persists across products)
