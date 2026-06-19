@@ -565,49 +565,49 @@ async function generateAndSaveProductSEO(productId, force = false) {
 
     console.log(`[SEO Background Worker] Generating SEO content for: "${product.title}" (${brandName})...`);
 
-    const prompt = `You are an expert SEO copywriter and clinical pharmacist specialized in health, nutrition, fitness, and dietary supplements in Egypt.
-Your task is to generate complete, high-quality, professional, and detailed bilingual (Arabic and English) content for the following product:
-- Product Title: ${product.title}
-- Brand: ${brandName}
-- Category: ${categoryName}
+    const prompt = `أنت خبير محتوى محترف وعالم صيدلة سريرية متخصص في المكملات والمنتجات الصحية في مصر.
+مهمتك هي كتابة محتوى متكامل، غني وعالي الجودة، ومتوافق تماماً مع محركات البحث (SEO) باللغة العربية لمنتج مكمل غذائي.
+- اسم المنتج: ${product.title}
+- الماركة: ${brandName}
+- القسم: ${categoryName}
 
-You MUST return a valid JSON object ONLY. Do not include any conversational explanation, markdown styling outside the json block, or formatting. The JSON object must have exactly the following structure:
+يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
 {
-  "desc": "A detailed Arabic description of the product. It must be scientifically accurate, highly engaging for customers, and exceed 250 words. It must naturally integrate relevant SEO keywords like 'مكملات غذائية', 'فيتامينات', and product-specific terms. Discuss the product purpose, benefits, why to buy it, and why The VitaHub is the best seller.",
-  "descEn": "A detailed English description of the product. It must exceed 250 words and naturally integrate SEO keywords like 'dietary supplements', 'vitamins', and product-specific terms. Discuss product purpose, benefits, and quality.",
-  "usage": "Clear, detailed step-by-step instructions in Arabic on how to use the product, recommended daily dosage, and best time of day to consume.",
-  "usageEn": "Clear, detailed step-by-step instructions in English on how to use the product, recommended daily dosage, and best time of day.",
-  "ingredients": "A complete list of active and inactive ingredients in Arabic (e.g. المكونات النشطة والمكونات الأخرى).",
-  "ingredientsEn": "A complete list of active and inactive ingredients in English.",
-  "warnings": "Important medical warnings, side effects, precautions, and contraindications in Arabic (e.g., consult doctor if pregnant, keep out of reach of children).",
-  "warningsEn": "Important medical warnings, side effects, precautions, and contraindications in English.",
-  "seoKeywords": "A comma-separated string of exactly 250 highly relevant and diverse Arabic search keywords and queries (e.g., مكملات غذائية, فيتامينات, ...). Provide a massive list of keywords, search phrases, and variations to maximize search indexing.",
-  "seoKeywordsEn": "A comma-separated string of exactly 250 highly relevant and diverse English search keywords and queries (e.g., dietary supplements, vitamins, ...). Provide a massive list of keywords, search phrases, and variations to maximize search indexing.",
-  "seoDesc": "A brief, compelling Meta Description in Arabic for SEO (max 155 characters) summarizing the product and urging users to buy.",
-  "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters) summarizing the product.",
+  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 250 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
+  "descEn": "Detailed professional description in English exceeding 250 words naturally integrating SEO keywords.",
+  "usage": "طريقة الاستخدام والجرعات الموصى بها بالتفصيل باللغة العربية.",
+  "usageEn": "Detailed usage and dosage instructions in English.",
+  "ingredients": "المكونات بالتفصيل باللغة العربية.",
+  "ingredientsEn": "Detailed ingredients list in English.",
+  "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
+  "warningsEn": "Medical warnings and precautions in English.",
+  "seoKeywords": "بالضبط 250 كلمة أو عبارة بحث مفتاحية متنوعة بالعربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ...).",
+  "seoKeywordsEn": "Exactly 250 highly relevant meta keywords and search queries in English separated by commas.",
+  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
+  "seoDescEn": "Meta description in English for Google search (150-220 characters).",
   "faqs": [
     {
-      "question_ar": "Frequently asked question 1 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 1 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 1 بالعربية؟",
+      "answer_ar": "إجابة احترافية 1 بالعربية.",
+      "question_en": "Question 1 in English?",
+      "answer_en": "Professional answer 1 in English."
     },
     {
-      "question_ar": "Frequently asked question 2 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 2 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 2 بالعربية؟",
+      "answer_ar": "إجابة احترافية 2 بالعربية.",
+      "question_en": "Question 2 in English?",
+      "answer_en": "Professional answer 2 in English."
     },
     {
-      "question_ar": "Frequently asked question 3 in Arabic?",
-      "answer_ar": "Detailed professional answer in Arabic.",
-      "question_en": "Frequently asked question 3 in English?",
-      "answer_en": "Detailed professional answer in English."
+      "question_ar": "سؤال شائع 3 بالعربية؟",
+      "answer_ar": "إجابة احترافية 3 بالعربية.",
+      "question_en": "Question 3 in English?",
+      "answer_en": "Professional answer 3 in English."
     }
   ]
 }
 
-Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
+تأكد من أن الوصف العربي يتجاوز 250 كلمة، وأن حقل seoKeywords يحتوي على بالضبط 250 كلمة مفتاحية باللغة العربية.`;
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
