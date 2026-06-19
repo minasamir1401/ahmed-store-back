@@ -123,19 +123,6 @@ async function main() {
     // By default, this updates products that have a description of less than 200 characters
     // You can modify this filter to update all products if needed
     const products = await prisma.product.findMany({
-      where: {
-        OR: [
-          { desc: null },
-          { desc: '' },
-          { desc: { defaultValue: '' } }, // Fetch empty ones
-          {
-            desc: {
-              // Custom length filter or we can process all products that don't have detailed descriptions
-              contains: ''
-            }
-          }
-        ]
-      },
       include: {
         brand: true,
         category: true
