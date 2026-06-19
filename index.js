@@ -581,8 +581,8 @@ You MUST return a valid JSON object ONLY. Do not include any conversational expl
   "ingredientsEn": "A complete list of active and inactive ingredients in English.",
   "warnings": "Important medical warnings, side effects, precautions, and contraindications in Arabic (e.g., consult doctor if pregnant, keep out of reach of children).",
   "warningsEn": "Important medical warnings, side effects, precautions, and contraindications in English.",
-  "seoKeywords": "A comma-separated string of 10-15 highly relevant Arabic search keywords (e.g., مكملات غذائية, فيتامينات, أوميجا 3, ...).",
-  "seoKeywordsEn": "A comma-separated string of 10-15 highly relevant English search keywords (e.g., dietary supplements, vitamins, omega 3, ...).",
+  "seoKeywords": "A comma-separated string of exactly 250 highly relevant and diverse Arabic search keywords and queries (e.g., مكملات غذائية, فيتامينات, ...). Provide a massive list of keywords, search phrases, and variations to maximize search indexing.",
+  "seoKeywordsEn": "A comma-separated string of exactly 250 highly relevant and diverse English search keywords and queries (e.g., dietary supplements, vitamins, ...). Provide a massive list of keywords, search phrases, and variations to maximize search indexing.",
   "seoDesc": "A brief, compelling Meta Description in Arabic for SEO (max 155 characters) summarizing the product and urging users to buy.",
   "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters) summarizing the product.",
   "faqs": [
