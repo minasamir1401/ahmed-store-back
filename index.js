@@ -535,7 +535,7 @@ function generateMockFAQs(productTitle) {
 }
 
 // Reusable SEO generator with OpenRouter Free Model
-async function generateAndSaveProductSEO(productId) {
+async function generateAndSaveProductSEO(productId, force = false) {
   try {
     const product = await prisma.product.findUnique({
       where: { id: productId },
@@ -544,14 +544,14 @@ async function generateAndSaveProductSEO(productId) {
 
     if (!product) {
       console.log(`[SEO Background Worker] Product ${productId} not found.`);
-      return;
+      return { success: false, error: 'Product not found' };
     }
 
     // Only update if it doesn't already have detailed descriptions
     const hasDetailedDesc = product.desc && product.desc.length > 200;
-    if (hasDetailedDesc) {
+    if (hasDetailedDesc && !force) {
       console.log(`[SEO Background Worker] Product ${product.title} already has detailed description. Skipping.`);
-      return;
+      return { success: true, skipped: true };
     }
 
     const apiKey = process.env.OPENROUTER_API_KEY;
@@ -670,6 +670,7 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
     });
 
     console.log(`[SEO Background Worker] Successfully updated product ${productId} SEO content.`);
+    return { success: true };
 
   } catch (error) {
     console.error(`[SEO Background Worker] Error updating product ${productId}:`, error.message);
@@ -707,7 +708,17 @@ function triggerSeoQueueProcessing() {
 }
 
 
-app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) => {
+app.post('/api/admin/products/:id/generate-seo', adminAuthenticate, async (req, res) => {
+  try {
+    const result = await generateAndSaveProductSEO(req.params.id, true);
+    res.json(result);
+  } catch (error) {
+    console.error('Manual SEO Generation Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate SEO' });
+  }
+});
+
+app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =>>,StartLine:710,TargetContent: {
   const systemMessage = req.body.messages?.find(m => m.role === 'system')?.content || '';
   const isFAQRequest = systemMessage.includes('الأسئلة الشائعة') || systemMessage.includes('FAQs');
 
