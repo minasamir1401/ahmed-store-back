@@ -10,7 +10,7 @@ if (!apiKey) {
 
 // OpenRouter configuration
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'google/gemini-2.5-flash'; // Highly capable, fast, and economical model for structured JSON outputs
+const MODEL_NAME = 'google/gemini-2.5-flash:free'; // Highly capable, fast, and completely free model for structured JSON outputs
 
 // Helper delay function to stay within API rate limits
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
