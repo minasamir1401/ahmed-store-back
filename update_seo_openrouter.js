@@ -81,7 +81,7 @@ You MUST return a valid JSON object ONLY. Do not include any conversational expl
 Ensure the Arabic description is over 250 words long, and the English description is over 250 words long. Follow professional scientific guidelines. Return the JSON object.`;
 
   let attempts = 0;
-  const maxAttempts = 5;
+  const maxAttempts = 10;
 
   while (attempts < maxAttempts) {
     attempts++;
@@ -112,12 +112,17 @@ Ensure the Arabic description is over 250 words long, and the English descriptio
       let retryAfter = 20; // Default fallback
       try {
         const parsedError = JSON.parse(errorText);
-        const sec = parsedError.error?.metadata?.retry_after_seconds || parsedError.error?.metadata?.headers?.['Retry-After'];
+        // OpenRouter returns metadata either directly or nested under error property
+        const sec = parsedError.metadata?.retry_after_seconds || 
+                    parsedError.metadata?.headers?.['Retry-After'] ||
+                    parsedError.error?.metadata?.retry_after_seconds ||
+                    parsedError.error?.metadata?.headers?.['Retry-After'];
         if (sec) retryAfter = Math.ceil(Number(sec));
       } catch (e) {}
       
-      console.log(`Waiting for ${retryAfter + 3} seconds before retrying...`);
-      await delay((retryAfter + 3) * 1000);
+      const delaySec = Math.max(retryAfter, 20) + (attempts * 10);
+      console.log(`Waiting for ${delaySec} seconds before retrying...`);
+      await delay(delaySec * 1000);
       continue;
     }
 
