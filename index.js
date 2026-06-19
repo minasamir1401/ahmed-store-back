@@ -902,6 +902,8 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       } catch (err) {
         console.warn(`[OpenRouter] Model ${modelName} failed:`, err.message);
         lastError = err;
+        // Wait 3 seconds before trying the next model to avoid hitting rate limits immediately
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
