@@ -609,34 +609,78 @@ async function generateAndSaveProductSEO(productId, force = false) {
 
 تأكد من أن الوصف العربي يتجاوز 250 كلمة، وأن حقل seoKeywords يحتوي على بالضبط 250 كلمة مفتاحية باللغة العربية.`;
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://the-vitahub.com',
-        'X-Title': 'The VitaHub Auto SEO'
-      },
-      body: JSON.stringify({
-        model: 'qwen/qwen3-next-80b-a3b-instruct:free',
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.3,
-        response_format: { type: 'json_object' }
-      })
-    });
+    let lastError = null;
+    let responseData = null;
+    let success = false;
+    const maxAttempts = 5;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenRouter status ${response.status}: ${errorText}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`[SEO Generation] Requesting OpenRouter (Attempt ${attempt}/${maxAttempts})...`);
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://the-vitahub.com',
+            'X-Title': 'The VitaHub Auto SEO'
+          },
+          body: JSON.stringify({
+            model: 'qwen/qwen3-next-80b-a3b-instruct:free',
+            messages: [
+              {
+                role: 'user',
+                content: prompt
+              }
+            ],
+            temperature: 0.3,
+            response_format: { type: 'json_object' }
+          })
+        });
+
+        if (response.status === 429) {
+          const errorText = await response.text();
+          let retryAfter = 10;
+          try {
+            const parsedError = JSON.parse(errorText);
+            const sec = parsedError.metadata?.retry_after_seconds || 
+                        parsedError.metadata?.headers?.['Retry-After'] ||
+                        parsedError.error?.metadata?.retry_after_seconds ||
+                        parsedError.error?.metadata?.headers?.['Retry-After'];
+            if (sec) retryAfter = Math.ceil(Number(sec));
+          } catch (e) {}
+          
+          if (attempt < maxAttempts) {
+            const delaySec = Math.max(retryAfter, 10) + (attempt * 5);
+            console.warn(`[SEO Generation] 429 Rate Limit. Retrying in ${delaySec} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, delaySec * 1000));
+            continue;
+          }
+          throw new Error(`OpenRouter 429 Rate Limit: ${errorText}`);
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`OpenRouter status ${response.status}: ${errorText}`);
+        }
+
+        responseData = await response.json();
+        success = true;
+        break;
+      } catch (err) {
+        console.warn(`[SEO Generation] Attempt ${attempt} failed:`, err.message);
+        lastError = err;
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+      }
     }
 
-    const data = await response.json();
-    const rawContent = data.choices?.[0]?.message?.content;
+    if (!success) {
+      throw new Error(`Failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
+    }
+
+    const rawContent = responseData.choices?.[0]?.message?.content;
     if (!rawContent) {
       throw new Error('OpenRouter returned empty choices.');
     }
