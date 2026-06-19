@@ -538,7 +538,8 @@ function generateMockFAQs(productTitle) {
 // When one model is rate-limited the helper auto-rotates to the next one.
 const OR_FREE_MODELS = [
   'meta-llama/llama-3.3-70b-instruct:free',
-  'meta-llama/llama-3.1-8b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'deepseek/deepseek-r1:free',
   'nvidia/nemotron-nano-12b-v2-vl:free'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
@@ -907,7 +908,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     let responseData = null;
     let success = false;
     let lastStatus = 503;
-    const maxAttempts = OR_FREE_MODELS.length;
+    const maxAttempts = OR_FREE_MODELS.length + 3;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const currentModel = OR_FREE_MODELS[orModelIndex];

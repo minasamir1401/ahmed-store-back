@@ -15,7 +15,8 @@ const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 // When one model is rate-limited the script automatically tries the next one.
 const FREE_MODELS = [
   'meta-llama/llama-3.3-70b-instruct:free',
-  'meta-llama/llama-3.1-8b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'deepseek/deepseek-r1:free',
   'nvidia/nemotron-nano-12b-v2-vl:free'
 ];
 
