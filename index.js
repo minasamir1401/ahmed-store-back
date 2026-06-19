@@ -681,15 +681,8 @@ const seoQueue = [];
 let seoQueueProcessing = false;
 
 function addToSeoQueue(productId) {
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.log(`[SEO Queue] Skip adding product ${productId} because OPENROUTER_API_KEY is not configured.`);
-    return;
-  }
-  if (!seoQueue.includes(productId)) {
-    seoQueue.push(productId);
-    console.log(`[SEO Queue] Added product ID ${productId} to SEO generation queue. Queue length: ${seoQueue.length}`);
-  }
-  triggerSeoQueueProcessing();
+  // Automatic SEO update is disabled by user request
+  return;
 }
 
 function triggerSeoQueueProcessing() {
@@ -788,7 +781,8 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     }
   }
 
-  // Support Google Gemini API directly with live Google Search grounding
+  // Support Google Gemini API directly with live Google Search grounding - DISABLED by user request
+  /*
   const geminiKey = process.env.GEMINI_API_KEY || '';
   
   if (geminiKey && (req.body.provider === 'gemini' || requestedModel.includes('gemini') || !process.env.OPENROUTER_API_KEY)) {
@@ -845,6 +839,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       console.warn('[Gemini direct call failed, trying OpenRouter fallback]', err);
     }
   }
+  */
 
   try {
     const apiKey = process.env.OPENROUTER_API_KEY || '';
@@ -853,28 +848,20 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
     delete payload.apiKey;
     delete payload.provider;
 
-    const modelsToTry = [];
-    if (payload.model) modelsToTry.push(payload.model);
-    if (Array.isArray(payload.models)) {
-      payload.models.forEach(m => {
-        if (!modelsToTry.includes(m)) modelsToTry.push(m);
-      });
-    }
+    // Use a single free model from OpenRouter as requested by the user
+    const modelName = payload.model || 'qwen/qwen3-next-80b-a3b-instruct:free';
+    payload.model = modelName;
     delete payload.models;
-
-    if (modelsToTry.length === 0) {
-      modelsToTry.push('qwen/qwen3-next-80b-a3b-instruct:free');
-    }
 
     let lastError = null;
     let responseData = null;
     let success = false;
     let lastStatus = 503;
+    const maxAttempts = 3;
 
-    for (const modelName of modelsToTry) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        console.log(`[OpenRouter] Trying model: ${modelName}`);
-        payload.model = modelName;
+        console.log(`[OpenRouter] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})`);
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -885,6 +872,28 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
         });
 
         lastStatus = response.status;
+
+        if (response.status === 429) {
+          const errorText = await response.text();
+          let retryAfter = 5;
+          try {
+            const parsedError = JSON.parse(errorText);
+            const sec = parsedError.metadata?.retry_after_seconds || 
+                        parsedError.metadata?.headers?.['Retry-After'] ||
+                        parsedError.error?.metadata?.retry_after_seconds ||
+                        parsedError.error?.metadata?.headers?.['Retry-After'];
+            if (sec) retryAfter = Math.ceil(Number(sec));
+          } catch (e) {}
+          
+          if (attempt < maxAttempts) {
+            const delaySec = Math.max(retryAfter, 5) + (attempt * 2);
+            console.warn(`[OpenRouter] 429 Rate Limit. Retrying in ${delaySec} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, delaySec * 1000));
+            continue;
+          }
+          throw new Error(`OpenRouter 429 Rate Limit: ${errorText}`);
+        }
+
         const contentType = response.headers.get("content-type");
         if (!contentType || !contentType.includes("application/json")) {
           const textError = await response.text();
@@ -900,21 +909,22 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
         success = true;
         break; // Success! Exit the loop.
       } catch (err) {
-        console.warn(`[OpenRouter] Model ${modelName} failed:`, err.message);
+        console.warn(`[OpenRouter] Attempt ${attempt} failed:`, err.message);
         lastError = err;
-        // Wait 3 seconds before trying the next model to avoid hitting rate limits immediately
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
       }
     }
 
     if (!success) {
-      console.error('[OpenRouter] All models failed. Last error:', lastError);
+      console.error('[OpenRouter] All attempts failed. Last error:', lastError);
       if (isFAQRequest) {
         return fallbackHandler();
       }
       return res.status(lastStatus).json({ 
         error: { 
-          message: "فشلت محاولات الاتصال بالذكاء الاصطناعي على كافة النماذج المتاحة. يرجى المحاولة لاحقاً.",
+          message: "فشلت محاولات الاتصال بالذكاء الاصطناعي على النموذج المحدد. يرجى المحاولة لاحقاً.",
           details: lastError ? lastError.message : undefined
         } 
       });
@@ -933,9 +943,8 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
 app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
   const { bmi, statusText, height, weight, age, gender, language } = req.body;
   const apiKey = process.env.OPENROUTER_API_KEY || '';
-  const geminiKey = process.env.GEMINI_API_KEY || '';
   const puterKey = process.env.PUTER_API_KEY || '';
-  if (!apiKey && !geminiKey && !puterKey) return res.status(503).json({ error: 'AI service is not configured' });
+  if (!apiKey && !puterKey) return res.status(503).json({ error: 'AI service is not configured' });
 
   const numericBmi = Number(bmi);
   if (!Number.isFinite(numericBmi) || numericBmi <= 0 || numericBmi > 100) {
@@ -951,27 +960,7 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
     ? `بياناتي: طول ${normalizeString(height, 10)}، وزن ${normalizeString(weight, 10)}، عمر ${normalizeString(age, 10)}، جنس ${gender === 'male' ? 'ذكر' : 'أنثى'}. مؤشر BMI هو ${numericBmi} وحالتي هي ${normalizeString(statusText, 80)}. قولي المختصر المفيد في 5 سطور بالظبط.`
     : `My data: Height ${normalizeString(height, 10)}cm, Weight ${normalizeString(weight, 10)}kg, Age ${normalizeString(age, 10)}, Gender ${gender === 'male' ? 'male' : 'female'}. My BMI is ${numericBmi} and my status is ${normalizeString(statusText, 80)}. Give me the exact summary in 5 lines.`;
 
-  if (geminiKey && !apiKey) {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: userMessage }] }],
-          systemInstruction: { parts: [{ text: systemInstruction }] }
-        })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        return res.json({ advice: text });
-      }
-    } catch (err) {
-      console.error('Gemini BMI error:', err);
-    }
-  }
-
-  if (puterKey && !apiKey && !geminiKey) {
+  if (puterKey && !apiKey) {
     try {
       const response = await fetch('https://api.puter.com/puterai/openai/v1/chat/completions', {
         method: 'POST',
@@ -1006,7 +995,7 @@ app.post('/api/ai/bmi-advice', authLimiter, async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-120b:free',
+        model: 'qwen/qwen3-next-80b-a3b-instruct:free',
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: userMessage }
