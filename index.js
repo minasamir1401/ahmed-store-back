@@ -45,7 +45,7 @@ const signToken = (user, expiresIn = process.env.JWT_EXPIRES_IN || '2h') => jwt.
 );
 
 const verifyGoogleIdToken = async (credential) => {
-  const googleClientId = process.env.GOOGLE_CLIENT_ID || '941750565259-bucmsc2elr7eb72uutmnelf5fmpfiv92.apps.googleusercontent.com';
+  const googleClientId = process.env.GOOGLE_CLIENT_ID;
   if (!googleClientId) {
     const error = new Error('Google sign-in is not configured');
     error.status = 503;
@@ -1255,7 +1255,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/auth/google-config', authLimiter, (req, res) => {
-  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '941750565259-bucmsc2elr7eb72uutmnelf5fmpfiv92.apps.googleusercontent.com' });
+  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '' });
 });
 
 app.get('/api/auth/test-diagnostic', adminAuthenticate, (req, res) => {
