@@ -535,14 +535,44 @@ function generateMockFAQs(productTitle) {
 }
 
 // ── OpenRouter Model Rotation ───────────────────────────
-// Rotating list of highly cost-effective, reliable models to prevent failures.
+// Rotating list of models (prioritizing user's requested free models, then paid fallbacks).
 const OR_FREE_MODELS = [
+  'openai/gpt-oss-120b:free',
+  'openai/gpt-oss-20b:free',
   'google/gemini-2.5-flash',
-  'meta-llama/llama-3.3-70b-instruct',
-  'meta-llama/llama-3.1-8b-instruct',
-  'qwen/qwen-2.5-coder-32b-instruct'
+  'meta-llama/llama-3.1-8b-instruct'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
+
+// Robust JSON parser for AI outputs
+function parseAIJSON(str) {
+  if (typeof str !== 'string') return {};
+  let cleaned = str.trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) cleaned = match[0];
+  cleaned = cleaned.replace(/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
+
+  let insideQuote = false;
+  let result = '';
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+    const isEscaped = i > 0 && cleaned[i - 1] === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
+
+    if (char === '"' && !isEscaped) {
+      insideQuote = !insideQuote;
+      result += char;
+    } else if (insideQuote) {
+      if (char === '\n') result += '\\n';
+      else if (char === '\r') result += '\\r';
+      else if (char === '\t') result += '\\t';
+      else result += char;
+    } else {
+      result += char;
+    }
+  }
+
+  return JSON.parse(result);
+}
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
 async function generateAndSaveProductSEO(productId, force = false, provider = 'openrouter') {
@@ -738,14 +768,19 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
       throw new Error('OpenRouter/APIFreeLLM returned empty choices.');
     }
 
-    const cleaned = rawContent
-      .trim()
-      .replace(/^```json/i, '')
-      .replace(/^```/, '')
-      .replace(/```$/, '')
-      .trim();
-      
-    const seoData = JSON.parse(cleaned);
+    let seoData;
+    try {
+      seoData = parseAIJSON(rawContent);
+    } catch (e) {
+      console.warn('[SEO Background Worker] Robust parse failed, trying standard fallback...', e.message);
+      const cleaned = rawContent
+        .trim()
+        .replace(/^```json/i, '')
+        .replace(/^```/, '')
+        .replace(/```$/, '')
+        .trim();
+      seoData = JSON.parse(cleaned);
+    }
 
     await prisma.product.update({
       where: { id: productId },

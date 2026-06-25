@@ -26,18 +26,47 @@ let currentModelIndex = 0;
 // Helper delay function to stay within API rate limits
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Helper to clean Markdown JSON code blocks from the API response
+// Helper to clean Markdown JSON code blocks from the API response robustly
 const parseJsonResponse = (text) => {
   try {
-    const cleaned = text
-      .trim()
-      .replace(/^```json/i, '')
-      .replace(/^```/, '')
-      .replace(/```$/, '')
-      .trim();
-    return JSON.parse(cleaned);
+    if (typeof text !== 'string') return {};
+    let cleaned = text.trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) cleaned = match[0];
+    cleaned = cleaned.replace(/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
+
+    let insideQuote = false;
+    let result = '';
+    for (let i = 0; i < cleaned.length; i++) {
+      const char = cleaned[i];
+      const isEscaped = i > 0 && cleaned[i - 1] === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
+
+      if (char === '"' && !isEscaped) {
+        insideQuote = !insideQuote;
+        result += char;
+      } else if (insideQuote) {
+        if (char === '\n') result += '\\n';
+        else if (char === '\r') result += '\\r';
+        else if (char === '\t') result += '\\t';
+        else result += char;
+      } else {
+        result += char;
+      }
+    }
+
+    return JSON.parse(result);
   } catch (err) {
-    throw new Error('Response is not valid JSON: ' + err.message + '\nRaw text: ' + text);
+    try {
+      const cleanedFallback = text
+        .trim()
+        .replace(/^```json/i, '')
+        .replace(/^```/, '')
+        .replace(/```$/, '')
+        .trim();
+      return JSON.parse(cleanedFallback);
+    } catch (fallbackErr) {
+      throw new Error('Response is not valid JSON: ' + err.message + '\nRaw text: ' + text);
+    }
   }
 };
 
