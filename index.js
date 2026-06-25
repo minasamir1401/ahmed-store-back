@@ -575,7 +575,7 @@ function parseAIJSON(str) {
 }
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
-// Reusable AI query function with fallback and key rotation
+// Reusable AI query function with fallback, key rotation, and request timeout
 async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
   if (provider === 'apifree') {
     const keysToTry = [];
@@ -585,6 +585,8 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
 
     let lastError = null;
     for (const key of keysToTry) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
       try {
         console.log(`[queryAI] Requesting APIFreeLLM with key: ${key.slice(0, 10)}...`);
         const response = await fetch('https://apifreellm.com/api/v1/chat', {
@@ -596,8 +598,11 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
           body: JSON.stringify({
             message: prompt,
             model: 'apifreellm'
-          })
+          }),
+          signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
           const text = await response.text();
@@ -610,6 +615,7 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
           throw new Error(data.message || 'success=false');
         }
       } catch (err) {
+        clearTimeout(timeoutId);
         console.warn(`[queryAI] APIFreeLLM key ${key.slice(0, 10)}... failed:`, err.message);
         lastError = err;
       }
@@ -624,6 +630,8 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
     const maxAttempts = OR_FREE_MODELS.length * 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const modelName = OR_FREE_MODELS[orModelIndex];
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
       try {
         console.log(`[queryAI] Requesting OpenRouter model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -640,8 +648,11 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
             temperature: 0.3,
             max_tokens: maxTokens,
             response_format: { type: 'json_object' }
-          })
+          }),
+          signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         if (response.status === 429) {
           await response.text();
@@ -667,6 +678,7 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
           throw new Error('Empty choices returned from OpenRouter');
         }
       } catch (err) {
+        clearTimeout(timeoutId);
         console.warn(`[queryAI] OpenRouter attempt ${attempt} failed:`, err.message);
         lastError = err;
         orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
