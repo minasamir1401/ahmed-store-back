@@ -35,6 +35,24 @@ const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
 const SITE_URL = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
 
+// Slug helpers for product URLs
+function slugify(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s\u0600-\u06FF-]/g, '') // Keep alphanumeric, spaces, Arabic letters, and dashes
+    .replace(/[\s_]+/g, '-')              // Replace spaces/underscores with dashes
+    .replace(/-+/g, '-')                  // Collapse multiple dashes
+    .replace(/^-+|-+$/g, '');             // Trim leading/trailing dashes
+}
+
+function getProductUrlParam(product) {
+  const source = product.titleEn || product.title || '';
+  const slug = slugify(source);
+  return slug ? `${slug}-${product.id}` : product.id;
+}
+
 const publicUserSelect = { id: true, email: true, name: true, phone: true, role: true };
 const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
 
@@ -2067,8 +2085,12 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
         supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
       }
     });
-    // Notify Google Indexing API
+    // Notify Google Indexing API (both old and new URLs)
     notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
+    const slugParam = getProductUrlParam(product);
+    if (slugParam !== product.id) {
+      notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
+    }
     
     // Trigger background SEO queue if description is missing or very short
     if (!desc || desc.trim().length < 100) {
@@ -2165,8 +2187,12 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
                 brandId: brand.id
               }
             });
-            // Optional: Notify Google Indexing API for new products
+            // Optional: Notify Google Indexing API for new products (both old and new URLs)
             notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
+            const slugParam = getProductUrlParam(product);
+            if (slugParam !== product.id) {
+              notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
+            }
             importedCount++;
             // Trigger background SEO for the newly created product
             addToSeoQueue(product.id);
@@ -2212,8 +2238,12 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
         supplementFacts, warnings, warningsEn, disclaimer, disclaimerEn, seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
       }
     });
-    // Notify Google Indexing API
+    // Notify Google Indexing API (both old and new URLs)
     notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
+    const slugParam = getProductUrlParam(product);
+    if (slugParam !== product.id) {
+      notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
+    }
     res.json(product);
   } catch (error) {
     console.error('PATCH /api/products error:', error);
@@ -2223,9 +2253,16 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
 
 app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
   try {
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
     await prisma.product.delete({ where: { id: req.params.id } });
-    // Notify Google Indexing API
+    // Notify Google Indexing API (both old and new URLs)
     notifyGoogleIndexing(`${SITE_URL}/product/${req.params.id}`, 'URL_DELETED');
+    if (product) {
+      const slugParam = getProductUrlParam(product);
+      if (slugParam !== req.params.id) {
+        notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_DELETED');
+      }
+    }
     res.json({ message: 'Product deleted' });
   } catch (error) {
     console.error('Error:', error);
