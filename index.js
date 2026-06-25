@@ -591,8 +591,8 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
   "ingredientsEn": "Detailed ingredients list in English.",
   "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
   "warningsEn": "Medical warnings and precautions in English.",
-  "seoKeywords": "بين 15 إلى 20 كلمة أو عبارة بحث مفتاحية متنوعة بالعربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ...).",
-  "seoKeywordsEn": "Between 15 to 20 highly relevant meta keywords and search queries in English separated by commas.",
+  "seoKeywords": "قائمة ضخمة ومكثفة تتكون من 300 كلمة أو عبارة بحث مفتاحية متنوعة وقوية باللغة العربية مفصولة بفواصل، لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ومصطلحات البحث الطبية، الشائعة، العامية، والبحث الطويل والقصير المرتبط بالمنتج).",
+  "seoKeywordsEn": "An extensive list of 300 highly relevant meta keywords and search queries in English separated by commas.",
   "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
   "seoDescEn": "Meta description in English for Google search (150-220 characters).",
   "faqs": [
@@ -617,7 +617,7 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
   ]
 }
 
-تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على بين 15 إلى 20 كلمة مفتاحية باللغة العربية.`;
+تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على 300 كلمة/عبارة مفتاحية باللغة العربية مفصولة بفواصل، وحقل seoKeywordsEn يحتوي على 300 كلمة/عبارة مفتاحية باللغة الإنجليزية مفصولة بفواصل.`;
 
     let responseData = null;
     let success = false;
@@ -682,7 +682,7 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
               model: modelName,
               messages: [{ role: 'user', content: prompt }],
               temperature: 0.3,
-              max_tokens: 1200,
+              max_tokens: 4000,
               response_format: { type: 'json_object' }
             })
           });
@@ -799,6 +799,29 @@ app.post('/api/admin/products/:id/generate-seo', adminAuthenticate, async (req, 
   } catch (error) {
     console.error('Manual SEO Generation Error:', error);
     res.status(500).json({ error: error.message || 'Failed to generate SEO' });
+  }
+});
+
+app.get('/api/admin/indexing/logs', adminAuthenticate, async (req, res) => {
+  try {
+    const logs = await prisma.indexingLog.findMany({
+      take: 50,
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(logs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/indexing/submit', adminAuthenticate, async (req, res) => {
+  const { url, type } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL is required' });
+  try {
+    const result = await notifyGoogleIndexing(url, type || 'URL_UPDATED');
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

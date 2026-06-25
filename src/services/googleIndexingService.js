@@ -34,12 +34,54 @@ const jwtClient = (clientEmail && privateKey) ? new google.auth.JWT({
   scopes: ['https://www.googleapis.com/auth/indexing']
 }) : null;
 
+const INDEXNOW_KEY = '8c772c63ef1a4030ab7b09ab491ff2c6';
+
+/**
+ * Notifies Bing IndexNow API about a URL update.
+ * @param {string} url - The exact URL that was updated.
+ */
+async function notifyIndexNow(url) {
+  try {
+    const parsedUrl = new URL(url);
+    const host = parsedUrl.host;
+    
+    console.log(`[IndexNow API] Notifying IndexNow for: ${url}`);
+    
+    const response = await fetch('https://api.indexnow.org/indexnow', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8'
+      },
+      body: JSON.stringify({
+        host: host,
+        key: INDEXNOW_KEY,
+        keyLocation: `https://${host}/${INDEXNOW_KEY}.txt`,
+        urlList: [url]
+      })
+    });
+
+    if (response.ok) {
+      console.log(`[IndexNow API] Successfully notified IndexNow for ${url}. Status: ${response.status}`);
+    } else {
+      const errText = await response.text();
+      console.warn(`[IndexNow API] Failed to notify IndexNow for ${url}. Status: ${response.status}. Response: ${errText}`);
+    }
+  } catch (err) {
+    console.error(`[IndexNow API] Error notifying IndexNow for ${url}:`, err.message);
+  }
+}
+
 /**
  * Notifies Google Indexing API about a URL update or deletion and logs to DB.
  * @param {string} url - The exact URL that was updated or deleted.
  * @param {'URL_UPDATED' | 'URL_DELETED'} type - The type of notification.
  */
 async function notifyGoogleIndexing(url, type = 'URL_UPDATED') {
+  // Call IndexNow in parallel for Bing/Yahoo (only for updates)
+  if (type === 'URL_UPDATED') {
+    notifyIndexNow(url).catch(err => console.error('[IndexNow API] error:', err));
+  }
+
   if (!jwtClient) {
     const errorMsg = 'Credentials are missing or could not be loaded.';
     console.warn(`[Google Indexing API] Cannot notify ${type} for ${url} because credentials are missing.`);

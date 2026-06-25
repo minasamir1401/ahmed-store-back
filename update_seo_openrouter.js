@@ -63,8 +63,8 @@ async function generateSeoForProduct(product) {
   "ingredientsEn": "Detailed ingredients list in English.",
   "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
   "warningsEn": "Medical warnings and precautions in English.",
-  "seoKeywords": "سلسلة من الكلمات المفتاحية باللغة العربية مفصولة بفواصل (من 10 إلى 15 كلمة مفتاحية).",
-  "seoKeywordsEn": "A comma-separated string of 10-15 highly relevant English search keywords.",
+  "seoKeywords": "قائمة ضخمة ومكثفة تتكون من 300 كلمة أو عبارة بحث مفتاحية متنوعة وقوية باللغة العربية مفصولة بفواصل، لتغطية كافة عمليات البحث الممكنة بشكل كامل.",
+  "seoKeywordsEn": "An extensive list of 300 highly relevant English search keywords separated by commas.",
   "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (حد أقصى 155 حرفاً).",
   "seoDescEn": "A brief, compelling Meta Description in English for SEO (max 155 characters).",
   "faqs": [
@@ -89,7 +89,7 @@ async function generateSeoForProduct(product) {
   ]
 }
 
-تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن الوصف الإنجليزي يتجاوز 100 كلمة. اتبع المعايير العلمية والطبية الدقيقة. أرجع كائن JSON فقط.`;
+تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن الوصف الإنجليزي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على 300 كلمة/عبارة مفتاحية باللغة العربية مفصولة بفواصل، وحقل seoKeywordsEn يحتوي على 300 كلمة/عبارة مفتاحية باللغة الإنجليزية مفصولة بفواصل لضمان التغطية القصوى للبحث. اتبع المعايير العلمية والطبية الدقيقة. أرجع كائن JSON فقط.`;
 
   let attempts = 0;
   const maxAttempts = FREE_MODELS.length * 3; // Try each model up to 3 times
@@ -116,7 +116,7 @@ async function generateSeoForProduct(product) {
           }
         ],
         temperature: 0.3,
-        max_tokens: 1200,
+        max_tokens: 4000,
         response_format: { type: 'json_object' }
       })
     });
