@@ -534,13 +534,13 @@ function generateMockFAQs(productTitle) {
   return JSON.stringify(faqs);
 }
 
-// ── OpenRouter Free Model Rotation ───────────────────────────
-// When one model is rate-limited the helper auto-rotates to the next one.
+// ── OpenRouter Model Rotation ───────────────────────────
+// Rotating list of highly cost-effective, reliable models to prevent failures.
 const OR_FREE_MODELS = [
-  'openai/gpt-oss-120b:free',
-  'openai/gpt-oss-20b:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen3-coder:free'
+  'google/gemini-2.5-flash',
+  'meta-llama/llama-3.3-70b-instruct',
+  'meta-llama/llama-3.1-8b-instruct',
+  'qwen/qwen-2.5-coder-32b-instruct'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
 
@@ -623,44 +623,58 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
     let success = false;
 
     if (provider === 'apifree') {
-      const apifreeKey = process.env.APIFREE_API_KEY || 'apf_xsuukak3i8667v8bcj4sx4wf';
-      console.log(`[SEO Generation] Requesting APIFreeLLM for: "${product.title}"...`);
-      try {
-        const response = await fetch('https://apifreellm.com/api/v1/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apifreeKey}`
-          },
-          body: JSON.stringify({
-            message: prompt,
-            model: 'apifreellm'
-          })
-        });
+      const keysToTry = [];
+      const envKey = process.env.APIFREE_API_KEY || '';
+      if (envKey) keysToTry.push(envKey);
+      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`APIFreeLLM returned status ${response.status}: ${errorText}`);
-        }
+      let lastError = null;
 
-        const data = await response.json();
-        if (!data.success || !data.response) {
-          throw new Error(data.message || 'APIFreeLLM returned success=false');
-        }
+      for (const key of keysToTry) {
+        try {
+          console.log(`[SEO Generation] Requesting APIFreeLLM with key: ${key.slice(0, 10)}... for: "${product.title}"...`);
+          const response = await fetch('https://apifreellm.com/api/v1/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${key}`
+            },
+            body: JSON.stringify({
+              message: prompt,
+              model: 'apifreellm'
+            })
+          });
 
-        responseData = {
-          choices: [
-            {
-              message: {
-                content: data.response
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`APIFreeLLM returned status ${response.status}: ${errorText}`);
+          }
+
+          const data = await response.json();
+          if (!data.success || !data.response) {
+            throw new Error(data.message || 'APIFreeLLM returned success=false');
+          }
+
+          responseData = {
+            choices: [
+              {
+                message: {
+                  content: data.response
+                }
               }
-            }
-          ]
-        };
-        success = true;
-      } catch (err) {
-        console.error(`[SEO Generation] APIFreeLLM call failed:`, err.message);
-        throw err;
+            ]
+          };
+          success = true;
+          break;
+        } catch (err) {
+          console.warn(`[SEO Generation] APIFreeLLM attempt with key ${key.slice(0, 10)}... failed:`, err.message);
+          lastError = err;
+        }
+      }
+
+      if (!success) {
+        console.error(`[SEO Generation] APIFreeLLM call failed after all attempts:`, lastError?.message);
+        throw lastError || new Error('APIFreeLLM call failed');
       }
     } else {
       let lastError = null;
@@ -960,7 +974,6 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   */
 
   // Support APIFreeLLM directly
-  const apifreeKey = process.env.APIFREE_API_KEY || 'apf_xsuukak3i8667v8bcj4sx4wf';
   if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
     try {
       const messages = req.body.messages || [];
@@ -972,40 +985,63 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       }
       prompt += userMsg;
 
-      console.log('[APIFreeLLM] Generating content using APIFreeLLM...');
-      const response = await fetch('https://apifreellm.com/api/v1/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apifreeKey}`
-        },
-        body: JSON.stringify({
-          message: prompt,
-          model: 'apifreellm'
-        })
-      });
+      const keysToTry = [];
+      const envKey = process.env.APIFREE_API_KEY || '';
+      if (envKey) keysToTry.push(envKey);
+      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success && data.response) {
-          return res.json({
-            choices: [
-              {
-                message: {
-                  role: 'assistant',
-                  content: data.response
-                }
-              }
-            ]
+      let responseData = null;
+      let success = false;
+      let lastErrText = '';
+
+      for (const key of keysToTry) {
+        try {
+          console.log(`[APIFreeLLM] Generating content using key: ${key.slice(0, 10)}...`);
+          const response = await fetch('https://apifreellm.com/api/v1/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${key}`
+            },
+            body: JSON.stringify({
+              message: prompt,
+              model: 'apifreellm'
+            })
           });
-        } else {
-          console.warn('APIFreeLLM API returned failure:', data);
-          throw new Error(data.message || 'APIFreeLLM returned success=false');
+
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.response) {
+              responseData = data;
+              success = true;
+              break;
+            } else {
+              console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... returned success=false:`, data);
+              lastErrText = data.message || 'success=false';
+            }
+          } else {
+            lastErrText = await response.text();
+            console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... returned status ${response.status}: ${lastErrText}`);
+          }
+        } catch (e) {
+          console.warn(`[APIFreeLLM] Attempt with key ${key.slice(0, 10)}... failed:`, e.message);
+          lastErrText = e.message;
         }
+      }
+
+      if (success && responseData) {
+        return res.json({
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: responseData.response
+              }
+            }
+          ]
+        });
       } else {
-        const errText = await response.text();
-        console.warn('APIFreeLLM API returned error status:', response.status, errText);
-        throw new Error(`APIFreeLLM API returned status ${response.status}`);
+        throw new Error(lastErrText || 'APIFreeLLM returned success=false or empty response');
       }
     } catch (err) {
       console.error('[APIFreeLLM call failed]', err);

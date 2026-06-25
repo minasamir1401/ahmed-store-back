@@ -2,13 +2,11 @@ require('dotenv').config();
 const apiKey = process.env.OPENROUTER_API_KEY || '';
 
 const models = [
-  "meta-llama/llama-3.3-70b-instruct:free",
-  "qwen/qwen3-next-80b-a3b-instruct:free",
-  "qwen/qwen3-coder:free",
   "google/gemini-2.5-flash",
-  "google/gemini-2.5-flash:free",
-  "meta-llama/llama-3.1-8b-instruct:free",
-  "google/gemma-2-9b-it",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen-2.5-coder-32b-instruct:free",
+  "meta-llama/llama-3-8b-instruct:free",
+  "deepseek/deepseek-r1:free",
   "meta-llama/llama-3.1-8b-instruct"
 ];
 
@@ -23,6 +21,7 @@ async function testModel(model) {
       },
       body: JSON.stringify({
         model: model,
+        max_tokens: 4000,
         messages: [{ role: "user", content: `Return ONLY the official website domain for brand "Optimum Nutrition" (e.g. brand.com). Do not include markdown or other text.` }]
       })
     });
