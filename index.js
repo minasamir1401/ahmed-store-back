@@ -575,6 +575,109 @@ function parseAIJSON(str) {
 }
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
+// Reusable AI query function with fallback and key rotation
+async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
+  if (provider === 'apifree') {
+    const keysToTry = [];
+    const envKey = process.env.APIFREE_API_KEY || '';
+    if (envKey) keysToTry.push(envKey);
+    keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
+
+    let lastError = null;
+    for (const key of keysToTry) {
+      try {
+        console.log(`[queryAI] Requesting APIFreeLLM with key: ${key.slice(0, 10)}...`);
+        const response = await fetch('https://apifreellm.com/api/v1/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`
+          },
+          body: JSON.stringify({
+            message: prompt,
+            model: 'apifreellm'
+          })
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`APIFreeLLM status ${response.status}: ${text}`);
+        }
+        const data = await response.json();
+        if (data.success && data.response) {
+          return data.response;
+        } else {
+          throw new Error(data.message || 'success=false');
+        }
+      } catch (err) {
+        console.warn(`[queryAI] APIFreeLLM key ${key.slice(0, 10)}... failed:`, err.message);
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('APIFreeLLM query failed');
+  } else {
+    // OpenRouter
+    const apiKey = process.env.OPENROUTER_API_KEY || '';
+    if (!apiKey) throw new Error('OPENROUTER_API_KEY is not defined');
+
+    let lastError = null;
+    const maxAttempts = OR_FREE_MODELS.length * 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const modelName = OR_FREE_MODELS[orModelIndex];
+      try {
+        console.log(`[queryAI] Requesting OpenRouter model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://the-vitahub.com',
+            'X-Title': 'The VitaHub Auto SEO'
+          },
+          body: JSON.stringify({
+            model: modelName,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.3,
+            max_tokens: maxTokens,
+            response_format: { type: 'json_object' }
+          })
+        });
+
+        if (response.status === 429) {
+          await response.text();
+          console.warn(`[queryAI] Model "${modelName}" 429. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
+        }
+
+        if (!response.ok) {
+          const errText = await response.text();
+          console.warn(`[queryAI] Model "${modelName}" status ${response.status}: ${errText}. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+        if (content) {
+          return content;
+        } else {
+          throw new Error('Empty choices returned from OpenRouter');
+        }
+      } catch (err) {
+        console.warn(`[queryAI] OpenRouter attempt ${attempt} failed:`, err.message);
+        lastError = err;
+        orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+    throw lastError || new Error('OpenRouter query failed');
+  }
+}
+
+// Reusable SEO generator with OpenRouter or APIFreeLLM
 async function generateAndSaveProductSEO(productId, force = false, provider = 'openrouter') {
   try {
     const product = await prisma.product.findUnique({
@@ -594,37 +697,28 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
       return { success: true, skipped: true };
     }
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      console.log(`[SEO Background Worker] OPENROUTER_API_KEY is not defined. Skipping.`);
-      return;
-    }
-
     const brandName = product.brand?.name || 'The VitaHub';
     const categoryName = product.category?.name || 'فيتامينات ومكملات';
 
-    console.log(`[SEO Background Worker] Generating SEO content for: "${product.title}" (${brandName})...`);
+    console.log(`[SEO Background Worker] Generating SEO content for: "${product.title}" (${brandName}) using ${provider}...`);
 
-    const prompt = `أنت خبير محتوى محترف وعالم صيدلة سريرية متخصص في المكملات والمنتجات الصحية في مصر.
+    // Call 1: Product Descriptions, Usage, Ingredients, Warnings, FAQs
+    const prompt1 = `أنت خبير محتوى محترف وعالم صيدلة سريرية متخصص في المكملات والمنتجات الصحية في مصر.
 مهمتك هي كتابة محتوى متكامل، غني وعالي الجودة، ومتوافق تماماً مع محركات البحث (SEO) باللغة العربية لمنتج مكمل غذائي.
 - اسم المنتج: ${product.title}
 - الماركة: ${brandName}
 - القسم: ${categoryName}
 
-يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية أو تنسيق Markdown وبدقة علمية تامة. يجب أن يحتوي كائن JSON على الهيكل التالي تماماً:
+يجب عليك إرجاع كائن JSON فقط بدون أي نصوص خارجية وبدقة علمية تامة بالهيكل التالي:
 {
-  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 350 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل بالتفصيل، مع دمج الكلمات المفتاحية بشكل طبيعي ولماذا الشراء من The VitaHub هو الأفضل.",
-  "descEn": "Detailed professional description in English exceeding 350 words naturally integrating SEO keywords.",
+  "desc": "وصف تفصيلي كامل ومقنع باللغة العربية يتجاوز 350 كلمة، يشرح الفوائد والمكونات ودواعي الاستخدام وكيف يساعد العميل بالتفصيل، ولماذا الشراء من The VitaHub هو الأفضل.",
+  "descEn": "Detailed professional description in English exceeding 350 words.",
   "usage": "طريقة الاستخدام والجرعات الموصى بها بالتفصيل باللغة العربية.",
   "usageEn": "Detailed usage and dosage instructions in English.",
   "ingredients": "المكونات بالتفصيل باللغة العربية.",
   "ingredientsEn": "Detailed ingredients list in English.",
   "warnings": "المحاذير الطبية وموانع الاستعمال باللغة العربية.",
   "warningsEn": "Medical warnings and precautions in English.",
-  "seoKeywords": "قائمة ضخمة ومكثفة تتكون من 300 كلمة أو عبارة بحث مفتاحية متنوعة وقوية باللغة العربية مفصولة بفواصل، لتغطية كافة عمليات البحث الممكنة (مثل: مكملات غذائية، فيتامينات، ومصطلحات البحث الطبية، الشائعة، العامية، والبحث الطويل والقصير المرتبط بالمنتج).",
-  "seoKeywordsEn": "An extensive list of 300 highly relevant meta keywords and search queries in English separated by commas.",
-  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
-  "seoDescEn": "Meta description in English for Google search (150-220 characters).",
   "faqs": [
     {
       "question_ar": "سؤال شائع 1 بالعربية؟",
@@ -645,159 +739,50 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
       "answer_en": "Professional answer 3 in English."
     }
   ]
-}
+}`;
 
-تأكد من أن الوصف العربي يتجاوز 100 كلمة، وأن حقل seoKeywords يحتوي على 300 كلمة/عبارة مفتاحية باللغة العربية مفصولة بفواصل، وحقل seoKeywordsEn يحتوي على 300 كلمة/عبارة مفتاحية باللغة الإنجليزية مفصولة بفواصل.`;
+    console.log(`[SEO Background Worker] Generating Part 1 (Content)...`);
+    const content1 = await queryAI(prompt1, 2500, provider);
+    const dataPart1 = parseAIJSON(content1);
 
-    let responseData = null;
-    let success = false;
+    // Wait 2 seconds to avoid rate limits
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    if (provider === 'apifree') {
-      const keysToTry = [];
-      const envKey = process.env.APIFREE_API_KEY || '';
-      if (envKey) keysToTry.push(envKey);
-      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
+    // Call 2: 300 Keywords and Meta descriptions
+    const prompt2 = `أنت خبير SEO محترف ومتخصص في المكملات والمنتجات الصحية في مصر.
+مهمتك هي كتابة الكلمات المفتاحية ووصف الميتا لصفحة المنتج.
+- اسم المنتج: ${product.title}
+- الماركة: ${brandName}
+- القسم: ${categoryName}
 
-      let lastError = null;
+يجب عليك إرجاع كائن JSON فقط بالهيكل التالي بدقة ودون أي كلام خارجي على الإطلاق:
+{
+  "seoKeywords": "قائمة ضخمة ومكثفة تتكون من 300 كلمة أو عبارة بحث مفتاحية متنوعة وقوية باللغة العربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة بشكل كامل.",
+  "seoKeywordsEn": "An extensive list of 300 highly relevant English search keywords separated by commas.",
+  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
+  "seoDescEn": "Meta description in English for Google search (150-220 characters)."
+}`;
 
-      for (const key of keysToTry) {
-        try {
-          console.log(`[SEO Generation] Requesting APIFreeLLM with key: ${key.slice(0, 10)}... for: "${product.title}"...`);
-          const response = await fetch('https://apifreellm.com/api/v1/chat', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${key}`
-            },
-            body: JSON.stringify({
-              message: prompt,
-              model: 'apifreellm'
-            })
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`APIFreeLLM returned status ${response.status}: ${errorText}`);
-          }
-
-          const data = await response.json();
-          if (!data.success || !data.response) {
-            throw new Error(data.message || 'APIFreeLLM returned success=false');
-          }
-
-          responseData = {
-            choices: [
-              {
-                message: {
-                  content: data.response
-                }
-              }
-            ]
-          };
-          success = true;
-          break;
-        } catch (err) {
-          console.warn(`[SEO Generation] APIFreeLLM attempt with key ${key.slice(0, 10)}... failed:`, err.message);
-          lastError = err;
-        }
-      }
-
-      if (!success) {
-        console.error(`[SEO Generation] APIFreeLLM call failed after all attempts:`, lastError?.message);
-        throw lastError || new Error('APIFreeLLM call failed');
-      }
-    } else {
-      let lastError = null;
-      const maxAttempts = OR_FREE_MODELS.length * 2;
-
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const modelName = OR_FREE_MODELS[orModelIndex];
-        try {
-          console.log(`[SEO Generation] Requesting model: ${modelName} (Attempt ${attempt}/${maxAttempts})...`);
-          const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': 'https://the-vitahub.com',
-              'X-Title': 'The VitaHub Auto SEO'
-            },
-            body: JSON.stringify({
-              model: modelName,
-              messages: [{ role: 'user', content: prompt }],
-              temperature: 0.3,
-              max_tokens: 4000,
-              response_format: { type: 'json_object' }
-            })
-          });
-
-          if (response.status === 429) {
-            await response.text();
-            console.warn(`[SEO Generation] Model "${modelName}" rate-limited. Switching...`);
-            orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-            await new Promise(resolve => setTimeout(resolve, orModelIndex === 0 ? 30000 : 5000));
-            continue;
-          }
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.warn(`[SEO Generation] Model "${modelName}" error ${response.status}. Switching...`);
-            orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            continue;
-          }
-
-          responseData = await response.json();
-          success = true;
-          break;
-        } catch (err) {
-          console.warn(`[SEO Generation] Attempt ${attempt} failed:`, err.message);
-          lastError = err;
-          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-      }
-
-      if (!success) {
-        throw new Error(`Failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
-      }
-    }
-
-    const rawContent = responseData.choices?.[0]?.message?.content;
-    if (!rawContent) {
-      throw new Error('OpenRouter/APIFreeLLM returned empty choices.');
-    }
-
-    let seoData;
-    try {
-      seoData = parseAIJSON(rawContent);
-    } catch (e) {
-      console.warn('[SEO Background Worker] Robust parse failed, trying standard fallback...', e.message);
-      const cleaned = rawContent
-        .trim()
-        .replace(/^```json/i, '')
-        .replace(/^```/, '')
-        .replace(/```$/, '')
-        .trim();
-      seoData = JSON.parse(cleaned);
-    }
+    console.log(`[SEO Background Worker] Generating Part 2 (Keywords & Meta)...`);
+    const content2 = await queryAI(prompt2, 2000, provider);
+    const dataPart2 = parseAIJSON(content2);
 
     await prisma.product.update({
       where: { id: productId },
       data: {
-        desc: seoData.desc || product.desc,
-        descEn: seoData.descEn || product.descEn,
-        usage: seoData.usage || product.usage,
-        usageEn: seoData.usageEn || product.usageEn,
-        ingredients: seoData.ingredients || product.ingredients,
-        ingredientsEn: seoData.ingredientsEn || product.ingredientsEn,
-        warnings: seoData.warnings || product.warnings,
-        warningsEn: seoData.warningsEn || product.warningsEn,
-        seoKeywords: seoData.seoKeywords || product.seoKeywords,
-        seoKeywordsEn: seoData.seoKeywordsEn || product.seoKeywordsEn,
-        seoDesc: seoData.seoDesc || product.seoDesc,
-        seoDescEn: seoData.seoDescEn || product.seoDescEn,
-        faqs: typeof seoData.faqs === 'object' ? JSON.stringify(seoData.faqs) : seoData.faqs || product.faqs
+        desc: dataPart1.desc || product.desc,
+        descEn: dataPart1.descEn || product.descEn,
+        usage: dataPart1.usage || product.usage,
+        usageEn: dataPart1.usageEn || product.usageEn,
+        ingredients: dataPart1.ingredients || product.ingredients,
+        ingredientsEn: dataPart1.ingredientsEn || product.ingredientsEn,
+        warnings: dataPart1.warnings || product.warnings,
+        warningsEn: dataPart1.warningsEn || product.warningsEn,
+        seoKeywords: dataPart2.seoKeywords || product.seoKeywords,
+        seoKeywordsEn: dataPart2.seoKeywordsEn || product.seoKeywordsEn,
+        seoDesc: dataPart2.seoDesc || product.seoDesc,
+        seoDescEn: dataPart2.seoDescEn || product.seoDescEn,
+        faqs: typeof dataPart1.faqs === 'object' ? JSON.stringify(dataPart1.faqs) : dataPart1.faqs || product.faqs
       }
     });
 
