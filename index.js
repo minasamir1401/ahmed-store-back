@@ -1774,9 +1774,13 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
     const apiKey = process.env.OPENROUTER_API_KEY || '';
     if (!apiKey) return res.status(503).json({ error: 'OpenRouter API key is not configured' });
 
-    const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+    const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".
+
+Answer with ONLY the domain name, nothing else. Do not write introductory text, do not write markdown, do not write explanations. Example output: brand.com`;
 
     const modelsToTry = [
+      "google/gemini-2.5-flash:free",
+      "google/gemini-2.5-flash",
       "meta-llama/llama-3.3-70b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct"
@@ -1785,6 +1789,25 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
     let domain = '';
     let success = false;
     let lastError = null;
+
+    const extractDomain = (text) => {
+      if (!text) return '';
+      let cleaned = text.trim().toLowerCase();
+      const domainRegex = /([a-z0-9-]+\.[a-z]{2,10}(?:\.[a-z]{2,10})?)/g;
+      const matches = cleaned.match(domainRegex);
+      if (matches && matches.length > 0) {
+        for (const match of matches) {
+          if (match !== 'notfound' && !match.includes('openrouter') && !match.includes('llama') && !match.includes('gemini') && match.length >= 4) {
+            return match;
+          }
+        }
+      }
+      cleaned = cleaned.replace(/[^a-z0-9.\-]/g, '');
+      if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+        return cleaned;
+      }
+      return '';
+    };
 
     for (const model of modelsToTry) {
       try {
@@ -1804,8 +1827,8 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
         if (response.ok) {
           const data = await response.json();
           const text = data.choices?.[0]?.message?.content || '';
-          const cleaned = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
-          if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+          const cleaned = extractDomain(text);
+          if (cleaned) {
             domain = cleaned;
             success = true;
             break;
@@ -1824,18 +1847,19 @@ app.post('/api/admin/auto-find-brand-logo', adminAuthenticate, async (req, res) 
       return res.status(404).json({ error: 'لم يتم العثور على موقع رسمي للماركة' });
     }
 
-    // Try Clearbit logo, fallback to Google Favicon
-    const logoUrl = `https://logo.clearbit.com/${domain}`;
-    const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+    // Try Hunter logo first (since it is our primary high-resolution, non-blocked service)
+    const logoUrl = `https://logos.hunter.io/${domain}`;
+    const fallbackUrl = `https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${domain}&size=128`;
 
-    let finalLogo = fallbackUrl;
+    let finalLogo = logoUrl;
     try {
       const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 5000 });
-      if (checkRes.ok) {
-        finalLogo = logoUrl;
+      if (!checkRes.ok) {
+        finalLogo = fallbackUrl;
       }
     } catch (e) {
-      console.warn('Failed to verify Clearbit logo, using fallback favicon:', e.message);
+      console.warn('Failed to verify Hunter logo, using fallback favicon:', e.message);
+      finalLogo = fallbackUrl;
     }
 
     res.json({ domain, logoUrl: finalLogo });
@@ -1855,16 +1879,39 @@ app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, 
     let updatedCount = 0;
 
     const modelsToTry = [
+      "google/gemini-2.5-flash:free",
+      "google/gemini-2.5-flash",
       "meta-llama/llama-3.3-70b-instruct:free",
       "meta-llama/llama-3.1-8b-instruct:free"
     ];
+
+    const extractDomain = (text) => {
+      if (!text) return '';
+      let cleaned = text.trim().toLowerCase();
+      const domainRegex = /([a-z0-9-]+\.[a-z]{2,10}(?:\.[a-z]{2,10})?)/g;
+      const matches = cleaned.match(domainRegex);
+      if (matches && matches.length > 0) {
+        for (const match of matches) {
+          if (match !== 'notfound' && !match.includes('openrouter') && !match.includes('llama') && !match.includes('gemini') && match.length >= 4) {
+            return match;
+          }
+        }
+      }
+      cleaned = cleaned.replace(/[^a-z0-9.\-]/g, '');
+      if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+        return cleaned;
+      }
+      return '';
+    };
 
     for (const brand of brands) {
       // Only find logo if they don't have a valid logo or are using a placeholder
       const hasPlaceholder = !brand.image || brand.image.includes('placehold.co') || brand.image === '';
       if (hasPlaceholder) {
         try {
-          const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${brand.name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".`;
+          const prompt = `Search the web or use your knowledge to find the official website domain of the dietary supplement, health, or vitamin brand named "${brand.name}". Only return the domain name (e.g., brand.com or company.co.uk). Do not include "www", protocols (http/https), slashes, markdown, or any other text. If not found, return "notfound".
+
+Answer with ONLY the domain name, nothing else. Do not write introductory text, do not write markdown, do not write explanations. Example output: brand.com`;
 
           let domain = '';
           let success = false;
@@ -1886,8 +1933,8 @@ app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, 
               if (response.ok) {
                 const data = await response.json();
                 const text = data.choices?.[0]?.message?.content || '';
-                const cleaned = text.trim().toLowerCase().replace(/[^a-z0-9.\-]/g, '');
-                if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+                const cleaned = extractDomain(text);
+                if (cleaned) {
                   domain = cleaned;
                   success = true;
                   break;
@@ -1899,13 +1946,15 @@ app.post('/api/admin/auto-find-all-brand-logos', adminAuthenticate, async (req, 
           }
 
           if (success && domain) {
-            const logoUrl = `https://logo.clearbit.com/${domain}`;
-            const fallbackUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
-            let finalLogo = fallbackUrl;
+            const logoUrl = `https://logos.hunter.io/${domain}`;
+            const fallbackUrl = `https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${domain}&size=128`;
+            let finalLogo = logoUrl;
             try {
               const checkRes = await fetch(logoUrl, { method: 'HEAD', timeout: 3000 });
-              if (checkRes.ok) finalLogo = logoUrl;
-            } catch (e) {}
+              if (!checkRes.ok) finalLogo = fallbackUrl;
+            } catch (e) {
+              finalLogo = fallbackUrl;
+            }
 
             await prisma.brand.update({
               where: { id: brand.id },
