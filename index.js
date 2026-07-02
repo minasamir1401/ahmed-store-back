@@ -594,51 +594,141 @@ function parseAIJSON(str) {
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
 // Reusable AI query function with fallback, key rotation, and request timeout
+// Centralized fetch function for APIFreeLLM with automatic retry and rate-limit handling
+async function fetchAPIFreeLLMWithRetry(prompt, keysToTry) {
+  let lastError = null;
+  const rateLimitTimes = [];
+
+  for (const key of keysToTry) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    try {
+      console.log(`[APIFreeLLM] Requesting APIFreeLLM with key: ${key.slice(0, 10)}...`);
+      const response = await fetch('https://apifreellm.com/api/v1/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${key}`
+        },
+        body: JSON.stringify({
+          message: prompt,
+          model: 'apifreellm'
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      const responseText = await response.text();
+      let data = null;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {}
+
+      const isRateLimit = response.status === 429 || 
+                          (data && (data.code === 429 || (data.error && typeof data.error === 'string' && data.error.toLowerCase().includes('rate limit'))));
+
+      const isServerError = [502, 503, 504].includes(response.status);
+
+      if (isRateLimit) {
+        let retryAfter = 18;
+        if (data && typeof data.retryAfter === 'number') {
+          retryAfter = data.retryAfter;
+        } else if (data && data.error && typeof data.error === 'string') {
+          const match = data.error.match(/wait (\d+) second/i);
+          if (match) retryAfter = parseInt(match[1], 10);
+        }
+        console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... rate limited. retryAfter: ${retryAfter}s`);
+        rateLimitTimes.push({ key, retryAfter });
+        lastError = new Error(data?.error || `Rate limit exceeded. Please wait ${retryAfter} seconds.`);
+        continue; // Try the next key
+      }
+
+      if (isServerError) {
+        console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... returned server error ${response.status}. Retrying next key...`);
+        lastError = new Error(`APIFreeLLM server error ${response.status}: ${responseText}`);
+        rateLimitTimes.push({ key, retryAfter: 3 });
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`APIFreeLLM status ${response.status}: ${responseText}`);
+      }
+
+      if (data && data.success && data.response) {
+        return data.response;
+      } else {
+        const errMsg = data ? (data.message || data.error || JSON.stringify(data)) : 'success=false';
+        throw new Error(errMsg);
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... failed:`, err.message);
+      lastError = err;
+    }
+  }
+
+  // If all keys failed, and any of them were due to rate limit or server error, let's wait and retry!
+  if (rateLimitTimes.length > 0) {
+    rateLimitTimes.sort((a, b) => a.retryAfter - b.retryAfter);
+    const bestChoice = rateLimitTimes[0];
+    
+    console.warn(`[APIFreeLLM] All keys failed/rate-limited. Best key to retry is ${bestChoice.key.slice(0, 10)}... in ${bestChoice.retryAfter}s. Waiting...`);
+    await new Promise(resolve => setTimeout(resolve, (bestChoice.retryAfter + 1.5) * 1000));
+    
+    const key = bestChoice.key;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    try {
+      console.log(`[APIFreeLLM] Retrying APIFreeLLM with key: ${key.slice(0, 10)}...`);
+      const response = await fetch('https://apifreellm.com/api/v1/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${key}`
+        },
+        body: JSON.stringify({
+          message: prompt,
+          model: 'apifreellm'
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      const responseText = await response.text();
+      let data = null;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {}
+
+      if (!response.ok) {
+        throw new Error(`APIFreeLLM status ${response.status}: ${responseText}`);
+      }
+
+      if (data && data.success && data.response) {
+        return data.response;
+      } else {
+        const errMsg = data ? (data.message || data.error || JSON.stringify(data)) : 'success=false';
+        throw new Error(errMsg);
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      console.error(`[APIFreeLLM] Retry failed:`, err.message);
+      throw err;
+    }
+  }
+
+  throw lastError || new Error('APIFreeLLM query failed');
+}
+
 async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
   if (provider === 'apifree') {
     const keysToTry = [];
     const envKey = process.env.APIFREE_API_KEY || '';
     if (envKey) keysToTry.push(envKey);
     keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
-
-    let lastError = null;
-    for (const key of keysToTry) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
-      try {
-        console.log(`[queryAI] Requesting APIFreeLLM with key: ${key.slice(0, 10)}...`);
-        const response = await fetch('https://apifreellm.com/api/v1/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${key}`
-          },
-          body: JSON.stringify({
-            message: prompt,
-            model: 'apifreellm'
-          }),
-          signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`APIFreeLLM status ${response.status}: ${text}`);
-        }
-        const data = await response.json();
-        if (data.success && data.response) {
-          return data.response;
-        } else {
-          throw new Error(data.message || 'success=false');
-        }
-      } catch (err) {
-        clearTimeout(timeoutId);
-        console.warn(`[queryAI] APIFreeLLM key ${key.slice(0, 10)}... failed:`, err.message);
-        lastError = err;
-      }
-    }
-    throw lastError || new Error('APIFreeLLM query failed');
+    return await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
   } else {
     // OpenRouter
     const apiKey = process.env.OPENROUTER_API_KEY || '';
@@ -778,19 +868,36 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
     // Wait 2 seconds to avoid rate limits
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Call 2: 300 Keywords and Meta descriptions
-    const prompt2 = `أنت خبير SEO محترف ومتخصص في المكملات والمنتجات الصحية في مصر.
-مهمتك هي كتابة الكلمات المفتاحية ووصف الميتا لصفحة المنتج.
+    // Call 2: Keywords and Meta descriptions matching user's custom SEO prompt
+    const prompt2 = `أنت خبير SEO متخصص في المتاجر الإلكترونية التي تبيع الفيتامينات والمكملات الغذائية. أريد منك إنشاء قائمة شاملة من الكلمات المفتاحية (SEO Keywords) لمنتج مكمل غذائي.
+
+التعليمات:
+* أنشئ من 200 إلى 500 كلمة مفتاحية.
+* اكتب الكلمات المفتاحية بالعربية والإنجليزية معًا بداخل حقل "seoKeywords" بفاصلة عربية "،".
+* أضف جميع أشكال اسم المنتج والعلامة التجارية.
+* أضف الكلمات المفتاحية المتعلقة بالفوائد المحتملة للمنتج بطريقة متوافقة مع سياسات Google.
+* أضف الكلمات المفتاحية المتعلقة بالاستخدامات العامة والصحة والعافية.
+* أضف كلمات البحث التجارية مثل: شراء، سعر، أفضل، أصلي، مستورد.
+* أضف الكلمات المفتاحية الخاصة بالمكونات النشطة.
+* أضف الكلمات المفتاحية الخاصة بالفئة (فيتامينات، مكملات، أعشاب، بروبيوتيك، معادن، إلخ).
+* أضف الكلمات المفتاحية الخاصة بالجمهور المستهدف (رجال، نساء، أطفال، رياضيين، كبار السن).
+* أضف الكلمات المفتاحية الخاصة بالجودة مثل: Non GMO، Gluten Free، Vegan، Organic، Made in USA.
+* أضف الكلمات المفتاحية الخاصة بالدعم الصحي بصيغة "دعم" فقط، وتجنب الادعاءات الطبية أو العلاجية.
+* لا تكرر الكلمات المفتاحية نفسها.
+* افصل جميع الكلمات المفتاحية بفاصلة عربية "،".
+* اجعل الناتج جاهزًا للنسخ واللصق في SEO.
+
+بيانات المنتج لدمجها:
 - اسم المنتج: ${product.title}
-- الماركة: ${brandName}
-- القسم: ${categoryName}
+- العلامة التجارية: ${brandName}
+- الفئة: ${categoryName}
 
 يجب عليك إرجاع كائن JSON فقط بالهيكل التالي بدقة ودون أي كلام خارجي على الإطلاق:
 {
-  "seoKeywords": "قائمة ضخمة ومكثفة تتكون من 300 كلمة أو عبارة بحث مفتاحية متنوعة وقوية باللغة العربية مفصولة بفواصل لتغطية كافة عمليات البحث الممكنة بشكل كامل.",
-  "seoKeywordsEn": "An extensive list of 300 highly relevant English search keywords separated by commas.",
-  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً).",
-  "seoDescEn": "Meta description in English for Google search (150-220 characters)."
+  "seoKeywords": "قائمة من 200 إلى 500 كلمة مفتاحية SEO بالعربية والإنجليزية معًا مفصولة بفاصلة عربية '،'.",
+  "seoKeywordsEn": "قائمة من 200 إلى 500 كلمة مفتاحية SEO بالعربية والإنجليزية معًا مفصولة بفاصلة عربية '،'.",
+  "seoDesc": "وصف ميتا للبحث بالعربية مقنع وجذاب ويشجع على الشراء (بين 150 و 220 حرفاً) مع ذكر اسم المتجر The VitaHub بشكل طبيعي.",
+  "seoDescEn": "Meta description in English for Google search (150-220 characters) naturally mentioning the store name The VitaHub."
 }`;
 
     console.log(`[SEO Background Worker] Generating Part 2 (Keywords & Meta)...`);
@@ -1040,59 +1147,17 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       if (envKey) keysToTry.push(envKey);
       keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
 
-      let responseData = null;
-      let success = false;
-      let lastErrText = '';
-
-      for (const key of keysToTry) {
-        try {
-          console.log(`[APIFreeLLM] Generating content using key: ${key.slice(0, 10)}...`);
-          const response = await fetch('https://apifreellm.com/api/v1/chat', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${key}`
-            },
-            body: JSON.stringify({
-              message: prompt,
-              model: 'apifreellm'
-            })
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            if (data.success && data.response) {
-              responseData = data;
-              success = true;
-              break;
-            } else {
-              console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... returned success=false:`, data);
-              lastErrText = data.message || 'success=false';
+      const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
+      return res.json({
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: responseText
             }
-          } else {
-            lastErrText = await response.text();
-            console.warn(`[APIFreeLLM] Key ${key.slice(0, 10)}... returned status ${response.status}: ${lastErrText}`);
           }
-        } catch (e) {
-          console.warn(`[APIFreeLLM] Attempt with key ${key.slice(0, 10)}... failed:`, e.message);
-          lastErrText = e.message;
-        }
-      }
-
-      if (success && responseData) {
-        return res.json({
-          choices: [
-            {
-              message: {
-                role: 'assistant',
-                content: responseData.response
-              }
-            }
-          ]
-        });
-      } else {
-        throw new Error(lastErrText || 'APIFreeLLM returned success=false or empty response');
-      }
+        ]
+      });
     } catch (err) {
       console.error('[APIFreeLLM call failed]', err);
       if (isFAQRequest) {
