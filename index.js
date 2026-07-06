@@ -124,7 +124,7 @@ const parseDbImageUrl = (url) => {
 
 const isDbImageUrl = (url) => Boolean(parseDbImageUrl(url));
 
-const optimizeImage = async (file) => {
+const optimizeImage = async (file, type) => {
   const extension = path.extname(file.originalname).replace('.', '') || 'jpg';
   
   let detectedMime = file.mimetype;
@@ -136,13 +136,47 @@ const optimizeImage = async (file) => {
     }
   }
 
+  let finalBuffer = file.buffer;
+  let finalWidth = null;
+  let finalHeight = null;
+
+  if (type === 'side-banner') {
+    try {
+      console.log('Resizing uploaded side-banner image to 800x400 using sharp...');
+      finalBuffer = await sharp(file.buffer)
+        .resize(800, 400, {
+          fit: 'cover',
+          position: 'center'
+        })
+        .toBuffer();
+      finalWidth = 800;
+      finalHeight = 400;
+    } catch (sharpError) {
+      console.error('Failed to resize image with sharp:', sharpError);
+    }
+  } else if (type === 'slider') {
+    try {
+      console.log('Resizing uploaded slider image to 1200x600 using sharp...');
+      finalBuffer = await sharp(file.buffer)
+        .resize(1200, 600, {
+          fit: 'cover',
+          position: 'center'
+        })
+        .toBuffer();
+      finalWidth = 1200;
+      finalHeight = 600;
+    } catch (sharpError) {
+      console.error('Failed to resize slider image with sharp:', sharpError);
+    }
+  }
+
   return {
-    data: file.buffer,
+    data: finalBuffer,
     thumbnailData: null, // Let it fallback to full image for speed
     mimeType: detectedMime,
-    width: null,
-    height: null,
-    size: file.size,
+    width: finalWidth,
+    height: finalHeight,
+    size: finalBuffer.length,
     extension: extension.toLowerCase()
   };
 };
@@ -412,7 +446,8 @@ app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, r
   try {
     if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
     const altText = resolveImageAlt(req.body, req.file);
-    const optimized = await optimizeImage(req.file);
+    const uploadType = req.query.type || req.body.type;
+    const optimized = await optimizeImage(req.file, uploadType);
     const uniqueSuffix = crypto.randomBytes(6).toString('hex');
     const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
     
