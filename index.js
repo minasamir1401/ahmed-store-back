@@ -14,6 +14,7 @@ const jwt = require('jsonwebtoken');
 const sharp = require('sharp');
 const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./src/services/whatsappService');
 const { notifyGoogleIndexing } = require('./src/services/googleIndexingService');
+const { sendOrderConfirmationEmail } = require('./src/services/emailService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -230,8 +231,29 @@ prisma.$connect()
         });
         console.log('Default admin user created successfully ✅');
       }
+
+      // Seed default settings if they do not exist
+      const defaultSettings = [
+        { key: 'smtp_host', value: 'smtp.gmail.com' },
+        { key: 'smtp_port', value: '587' },
+        { key: 'smtp_secure', value: 'false' },
+        { key: 'smtp_user', value: '' },
+        { key: 'smtp_pass', value: '' },
+        { key: 'from_email', value: '' },
+        { key: 'from_name', value: 'The VitaHub' },
+        { key: 'whatsapp_number', value: '01201450111' },
+        { key: 'receiving_number', value: '01009596452' }
+      ];
+
+      for (const setting of defaultSettings) {
+        const exists = await prisma.setting.findUnique({ where: { key: setting.key } });
+        if (!exists) {
+          await prisma.setting.create({ data: setting });
+          console.log(`Seeded default setting: ${setting.key} = ${setting.value}`);
+        }
+      }
     } catch (err) {
-      console.error('Error seeding default admin:', err);
+      console.error('Error seeding default admin/settings:', err);
     }
   })
   .catch((err) => console.error('Failed to connect to database:', err));
@@ -1697,6 +1719,104 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   }
 });
 
+async function getSetting(tx, key, defaultValue) {
+  try {
+    const setting = await tx.setting.findUnique({ where: { key } });
+    return setting ? setting.value : defaultValue;
+  } catch (err) {
+    return defaultValue;
+  }
+}
+
+async function setSetting(tx, key, value) {
+  await tx.setting.upsert({
+    where: { key },
+    update: { value },
+    create: { key, value }
+  });
+}
+
+// ── Settings Endpoints ──────────────────
+app.get('/api/settings', async (req, res) => {
+  try {
+    const whatsapp_number = await getSetting(prisma, 'whatsapp_number', '01201450111');
+    const receiving_number = await getSetting(prisma, 'receiving_number', '01009596452');
+    res.json({ whatsapp_number, receiving_number });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
+  try {
+    const keys = [
+      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
+      'smtp_pass', 'from_email', 'from_name',
+      'whatsapp_number', 'receiving_number'
+    ];
+    const settings = {};
+    for (const key of keys) {
+      let def = '';
+      if (key === 'smtp_host') def = 'smtp.gmail.com';
+      if (key === 'smtp_port') def = '587';
+      if (key === 'smtp_secure') def = 'false';
+      if (key === 'from_name') def = 'The VitaHub';
+      if (key === 'whatsapp_number') def = '01201450111';
+      if (key === 'receiving_number') def = '01009596452';
+
+      settings[key] = await getSetting(prisma, key, def);
+    }
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
+  const data = req.body;
+  try {
+    const keys = [
+      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
+      'smtp_pass', 'from_email', 'from_name',
+      'whatsapp_number', 'receiving_number'
+    ];
+    for (const key of keys) {
+      if (data[key] !== undefined) {
+        await setSetting(prisma, key, String(data[key]));
+      }
+    }
+    res.json({ message: 'تم حفظ الإعدادات بنجاح' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'البريد الإلكتروني للمستلم مطلوب' });
+  try {
+    const keys = [
+      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
+      'smtp_pass', 'from_email', 'from_name'
+    ];
+    const settings = {};
+    for (const key of keys) {
+      let def = '';
+      if (key === 'smtp_host') def = 'smtp.gmail.com';
+      if (key === 'smtp_port') def = '587';
+      if (key === 'smtp_secure') def = 'false';
+      if (key === 'from_name') def = 'The VitaHub';
+      settings[key] = await getSetting(prisma, key, def);
+    }
+    const { sendTestEmail } = require('./src/services/emailService');
+    await sendTestEmail(settings, to);
+    res.json({ message: 'تم إرسال بريد إلكتروني تجريبي بنجاح' });
+  } catch (error) {
+    console.error('SMTP test email error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── WhatsApp and Forgot Password Endpoints ──────────────────
 app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const { phone } = req.body;
@@ -2792,8 +2912,30 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     res.status(201).json(order);
 
     // Send order confirmation message via WhatsApp asynchronously
-    const orderMessage = `مرحباً ${order.customerName}،\nتم استلام طلبك بنجاح! 🎉\nرقم الطلب: #${order.orderNumber}\nإجمالي السعر: ${order.total} ج.م.\nشكراً لتسوقك من The VitaHub!`;
+    const itemsListText = order.items && order.items.length > 0 
+      ? order.items.map(item => `• ${item.title} (العدد: ${item.quantity})`).join('\n')
+      : '';
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://the-vitahub.com';
+    const orderMessage = `مرحباً ${order.customerName}،
+
+تم استلام طلبك بنجاح في متجر The VitaHub! 🎉
+
+تفاصيل طلبك رقم #${order.orderNumber}:
+${itemsListText}
+
+الشحن والتوصيل: ${order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`}
+إجمالي السعر: ${order.total} ج.م
+طريقة الدفع: ${order.paymentMethod === 'cod' ? 'الدفع عند الاستلام' : (order.paymentMethod === 'instapay' ? 'إنستاباي' : 'المحفظة الإلكترونية')}
+
+رابط الموقع: ${siteUrl}
+شكراً لتسوقك معنا! ❤️`;
+
     sendWhatsAppMessage(order.customerPhone, orderMessage);
+
+    // Send order confirmation email asynchronously if customer email is provided
+    if (order.customerEmail) {
+      sendOrderConfirmationEmail(prisma, order);
+    }
   } catch (error) {
     console.error('POST /api/orders error:', error);
     res.status(500).json({ error: error.message });
