@@ -14,7 +14,7 @@ async function getSetting(prisma, key, defaultValue) {
 /**
  * Sends a confirmation email to the customer after order placement.
  */
-async function sendOrderConfirmationEmail(prisma, order) {
+async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
   try {
     const to = order.customerEmail;
     if (!to || !to.includes('@')) {
@@ -47,27 +47,52 @@ async function sendOrderConfirmationEmail(prisma, order) {
       tls: { rejectUnauthorized: false }
     });
 
+    const isEn = language === 'en';
+    const currencyText = isEn ? 'EGP' : 'ج.م';
+
     const itemsHtml = order.items.map(item => `
       <tr>
-        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; font-weight: bold; color: #2d3748; text-align: right;">
+        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; font-weight: bold; color: #2d3748; text-align: ${isEn ? 'left' : 'right'};">
           ${item.title}
         </td>
         <td style="padding: 12px; border-bottom: 1px solid #edf2f7; text-align: center; color: #4a5568;">
           ${item.quantity}
         </td>
-        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; text-align: left; font-weight: bold; color: #10b981;">
-          ${item.price} ج.م
+        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; text-align: ${isEn ? 'right' : 'left'}; font-weight: bold; color: #10b981;">
+          ${item.price} ${currencyText}
         </td>
-        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; text-align: left; font-weight: bold; color: #10b981;">
-          ${item.price * item.quantity} ج.م
+        <td style="padding: 12px; border-bottom: 1px solid #edf2f7; text-align: ${isEn ? 'right' : 'left'}; font-weight: bold; color: #10b981;">
+          ${item.price * item.quantity} ${currencyText}
         </td>
       </tr>
     `).join('');
 
     let paymentInstructions = '';
     if (order.paymentMethod === 'instapay' || order.paymentMethod === 'wallet') {
-      const waLink = `https://wa.me/20${whatsappNumber.replace(/^0/, '')}?text=${encodeURIComponent(`تم تحويل مبلغ ${order.total} ج.م لطلب جديد رقم #${order.orderNumber} باسم: ${order.customerName}`)}`;
-      paymentInstructions = `
+      const waLink = `https://wa.me/20${whatsappNumber.replace(/^0/, '')}?text=${encodeURIComponent(
+        isEn
+          ? `Transferred amount of ${order.total} EGP for order #${order.orderNumber} by: ${order.customerName}`
+          : `تم تحويل مبلغ ${order.total} ج.م لطلب جديد رقم #${order.orderNumber} باسم: ${order.customerName}`
+      )}`;
+      paymentInstructions = isEn ? `
+        <div style="margin-top: 24px; padding: 20px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 12px; text-align: left; direction: ltr;">
+          <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">⚠️ Payment & Receipt Instructions</h4>
+          <p style="margin: 0 0 12px 0; color: #d97706; font-size: 14px; line-height: 1.6;">
+            Please transfer the amount of <strong>${order.total} EGP</strong> to the following number via <strong>InstaPay</strong> or any electronic wallet (Vodafone Cash, etc.):
+          </p>
+          <div style="background-color: #ffffff; padding: 12px; border: 1px solid #fde68a; border-radius: 8px; text-align: center; font-size: 18px; font-weight: bold; color: #78350f; letter-spacing: 1px; margin-bottom: 15px;">
+            ${receivingNumber}
+          </div>
+          <p style="margin: 0 0 15px 0; color: #d97706; font-size: 13px; line-height: 1.5;">
+            After transfer, please send a screenshot of the receipt via WhatsApp to activate and ship your order as soon as possible.
+          </p>
+          <div style="text-align: center;">
+            <a href="${waLink}" target="_blank" style="display: inline-block; background-color: #25d366; color: #ffffff; padding: 12px 24px; border-radius: 8px; font-weight: bold; text-decoration: none; font-size: 14px; box-shadow: 0 4px 6px rgba(37, 211, 102, 0.15);">
+              Send Receipt via WhatsApp 💬
+            </a>
+          </div>
+        </div>
+      ` : `
         <div style="margin-top: 24px; padding: 20px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 12px; text-align: right; direction: rtl;">
           <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">⚠️ تعليمات الدفع وإرسال الإيصال</h4>
           <p style="margin: 0 0 12px 0; color: #d97706; font-size: 14px; line-height: 1.6;">
@@ -88,9 +113,53 @@ async function sendOrderConfirmationEmail(prisma, order) {
       `;
     }
 
+    const emailSubject = isEn 
+      ? `Order Confirmation - The VitaHub (#${order.orderNumber})`
+      : `تأكيد طلبك من The VitaHub (#${order.orderNumber})`;
+
+    const emailSubText = isEn
+      ? '100% Original Vitamins & Dietary Supplements'
+      : 'مكملات غذائية وفيتامينات أصلية 100%';
+
+    const greetingText = isEn
+      ? `Hello ${order.customerName},`
+      : `مرحباً ${order.customerName}،`;
+
+    const introText = isEn
+      ? 'Your order has been placed successfully and is being prepared for shipping. Here are your invoice details:'
+      : 'تم استلام طلبك بنجاح وجاري العمل على تجهيزه وشحنه إليك في أقرب وقت. إليك تفاصيل فاتورة طلبك:';
+
+    const orderNumberLabel = isEn ? 'Order Number:' : 'رقم الطلب:';
+    const orderDateLabel = isEn ? 'Order Date:' : 'تاريخ الطلب:';
+    const addressLabel = isEn ? 'Address:' : 'العنوان:';
+    const phoneLabel = isEn ? 'Phone:' : 'الهاتف:';
+
+    const orderDateFormatted = isEn
+      ? new Date(order.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      : new Date(order.createdAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const tableProductHeader = isEn ? 'Product' : 'المنتج';
+    const tableQtyHeader = isEn ? 'Quantity' : 'الكمية';
+    const tablePriceHeader = isEn ? 'Price' : 'السعر';
+    const tableTotalHeader = isEn ? 'Total' : 'الإجمالي';
+
+    const shippingLabel = isEn ? 'Shipping & Delivery:' : 'الشحن والتوصيل:';
+    const freeText = isEn ? 'Free' : 'مجاني';
+    const shippingFeeFormatted = order.shippingFee === 0 ? freeText : `${order.shippingFee} ${currencyText}`;
+
+    const finalTotalLabel = isEn ? 'Final Total:' : 'الإجمالي النهائي:';
+
+    const footerText1 = isEn
+      ? `Thank you for shopping at <a href="${siteUrl}" style="color: #10b981; text-decoration: none; font-weight: bold;">The VitaHub</a>.`
+      : `شكراً لتسوقك من <a href="${siteUrl}" style="color: #10b981; text-decoration: none; font-weight: bold;">The VitaHub</a>.`;
+
+    const footerText2 = isEn
+      ? `If you have any questions, you can contact us on WhatsApp at <a href="https://wa.me/20${whatsappNumber.replace(/^0/, '')}">+20${whatsappNumber.substring(1)}</a>`
+      : `إذا كان لديك أي استفسار، يمكنك دائماً التواصل معنا عبر الواتساب على رقم <a href="https://wa.me/20${whatsappNumber.replace(/^0/, '')}">+20${whatsappNumber.substring(1)}</a>`;
+
     const htmlContent = `
       <!DOCTYPE html>
-      <html dir="rtl" lang="ar">
+      <html dir="${isEn ? 'ltr' : 'rtl'}" lang="${language}">
       <head>
         <meta charset="utf-8">
         <style>
@@ -99,7 +168,7 @@ async function sendOrderConfirmationEmail(prisma, order) {
           .header { background-color: #064e3b; color: #ffffff; padding: 30px; text-align: center; }
           .header h1 { margin: 0; font-size: 24px; font-weight: 800; }
           .header p { margin: 5px 0 0 0; font-size: 12px; opacity: 0.8; font-weight: bold; }
-          .content { padding: 30px; text-align: right; direction: rtl; }
+          .content { padding: 30px; text-align: ${isEn ? 'left' : 'right'}; direction: ${isEn ? 'ltr' : 'rtl'}; }
           .greeting { font-size: 18px; font-weight: bold; color: #1a202c; margin-bottom: 10px; }
           .message { font-size: 14px; color: #4a5568; line-height: 1.6; margin-bottom: 25px; }
           .details-card { background-color: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 25px; border: 1px solid #edf2f7; }
@@ -108,10 +177,10 @@ async function sendOrderConfirmationEmail(prisma, order) {
           .details-value { font-weight: bold; color: #2d3748; }
           .table-container { width: 100%; border-collapse: collapse; margin-bottom: 25px; }
           .table-header { background-color: #f8fafc; color: #718096; font-size: 11px; text-transform: uppercase; font-weight: 800; }
-          .table-header th { padding: 12px; text-align: right; border-bottom: 2px solid #edf2f7; }
+          .table-header th { padding: 12px; text-align: ${isEn ? 'left' : 'right'}; border-bottom: 2px solid #edf2f7; }
           .summary-row { font-size: 14px; font-weight: bold; color: #2d3748; }
-          .summary-label { padding: 12px; text-align: right; color: #718096; }
-          .summary-value { padding: 12px; text-align: left; }
+          .summary-label { padding: 12px; text-align: ${isEn ? 'left' : 'right'}; color: #718096; }
+          .summary-value { padding: 12px; text-align: ${isEn ? 'right' : 'left'}; }
           .total-row { font-size: 18px; font-weight: 800; color: #064e3b; background-color: #f0fdf4; }
           .footer { background-color: #f8fafc; padding: 20px; text-align: center; font-size: 11px; color: #a0aec0; border-top: 1px solid #edf2f7; }
           .footer a { color: #10b981; text-decoration: none; font-weight: bold; }
@@ -121,29 +190,29 @@ async function sendOrderConfirmationEmail(prisma, order) {
         <div class="container">
           <div class="header">
             <h1><a href="${siteUrl}" style="color: #ffffff; text-decoration: none;">The VitaHub</a></h1>
-            <p>مكملات غذائية وفيتامينات أصلية 100%</p>
+            <p>${emailSubText}</p>
           </div>
           <div class="content">
-            <div class="greeting">مرحباً ${order.customerName}،</div>
+            <div class="greeting">${greetingText}</div>
             <div class="message">
-              تم استلام طلبك بنجاح وجاري العمل على تجهيزه وشحنه إليك في أقرب وقت. إليك تفاصيل فاتورة طلبك:
+              ${introText}
             </div>
 
             <div class="details-card">
               <div class="details-row">
-                <span class="details-label">رقم الطلب:</span>
+                <span class="details-label">${orderNumberLabel}</span>
                 <span class="details-value">#${order.orderNumber}</span>
               </div>
               <div class="details-row">
-                <span class="details-label">تاريخ الطلب:</span>
-                <span class="details-value">${new Date(order.createdAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+                <span class="details-label">${orderDateLabel}</span>
+                <span class="details-value">${orderDateFormatted}</span>
               </div>
               <div class="details-row">
-                <span class="details-label">العنوان:</span>
+                <span class="details-label">${addressLabel}</span>
                 <span class="details-value">${order.governorate} - ${order.district} - ${order.address}</span>
               </div>
               <div class="details-row">
-                <span class="details-label">الهاتف:</span>
+                <span class="details-label">${phoneLabel}</span>
                 <span class="details-value">${order.customerPhone}</span>
               </div>
             </div>
@@ -151,24 +220,24 @@ async function sendOrderConfirmationEmail(prisma, order) {
             <table class="table-container">
               <thead>
                 <tr class="table-header">
-                  <th style="text-align: right;">المنتج</th>
-                  <th style="text-align: center; width: 60px;">الكمية</th>
-                  <th style="text-align: left; width: 100px;">السعر</th>
-                  <th style="text-align: left; width: 100px;">الإجمالي</th>
+                  <th style="text-align: ${isEn ? 'left' : 'right'};">${tableProductHeader}</th>
+                  <th style="text-align: center; width: 60px;">${tableQtyHeader}</th>
+                  <th style="text-align: ${isEn ? 'right' : 'left'}; width: 100px;">${tablePriceHeader}</th>
+                  <th style="text-align: ${isEn ? 'right' : 'left'}; width: 100px;">${tableTotalHeader}</th>
                 </tr>
               </thead>
               <tbody>
                 ${itemsHtml}
                 <tr class="summary-row">
-                  <td colspan="2" class="summary-label">الشحن والتوصيل:</td>
-                  <td colspan="2" style="padding: 12px; text-align: left; color: #10b981;">
-                    ${order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`}
+                  <td colspan="2" class="summary-label">${shippingLabel}</td>
+                  <td colspan="2" style="padding: 12px; text-align: ${isEn ? 'right' : 'left'}; color: #10b981;">
+                    ${shippingFeeFormatted}
                   </td>
                 </tr>
                 <tr class="total-row">
-                  <td colspan="2" style="padding: 15px; text-align: right;">الإجمالي النهائي:</td>
-                  <td colspan="2" style="padding: 15px; text-align: left;">
-                    ${order.total} ج.م
+                  <td colspan="2" style="padding: 15px; text-align: ${isEn ? 'left' : 'right'};">${finalTotalLabel}</td>
+                  <td colspan="2" style="padding: 15px; text-align: ${isEn ? 'right' : 'left'};">
+                    ${order.total} ${currencyText}
                   </td>
                 </tr>
               </tbody>
@@ -177,8 +246,8 @@ async function sendOrderConfirmationEmail(prisma, order) {
             ${paymentInstructions}
           </div>
           <div class="footer">
-            <p>شكراً لتسوقك من <a href="${siteUrl}" style="color: #10b981; text-decoration: none; font-weight: bold;">The VitaHub</a>.</p>
-            <p>إذا كان لديك أي استفسار، يمكنك دائماً التواصل معنا عبر الواتساب على رقم <a href="https://wa.me/20${whatsappNumber.replace(/^0/, '')}">+20${whatsappNumber.substring(1)}</a></p>
+            <p>${footerText1}</p>
+            <p>${footerText2}</p>
           </div>
         </div>
       </body>
@@ -188,10 +257,10 @@ async function sendOrderConfirmationEmail(prisma, order) {
     await transporter.sendMail({
       from: `"${fromName}" <${fromEmail}>`,
       to,
-      subject: `تأكيد طلبك من The VitaHub (#${order.orderNumber})`,
+      subject: emailSubject,
       html: htmlContent
     });
-    console.log(`Order confirmation email sent successfully to ${to}`);
+    console.log(`Order confirmation email (${language}) sent successfully to ${to}`);
     return true;
   } catch (err) {
     console.error('Error sending order confirmation email:', err);

@@ -2829,8 +2829,10 @@ app.get('/api/orders/track/:orderNumber', async (req, res) => {
 app.post('/api/orders', optionalAuthenticate, async (req, res) => {
   const { 
     customerName, customerEmail, customerPhone, governorate, district, 
-    address, building, floor, apartment, notes, paymentMethod, items 
+    address, building, floor, apartment, notes, paymentMethod, items,
+    language
   } = req.body;
+  const orderLanguage = language === 'en' ? 'en' : 'ar';
   
   try {
     if (!Array.isArray(items) || items.length === 0 || items.length > 50) return res.status(400).json({ error: 'سلة المنتجات غير صالحة' });
@@ -2912,20 +2914,48 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     res.status(201).json(order);
 
     // Send order confirmation message via WhatsApp asynchronously
-    const itemsListText = order.items && order.items.length > 0 
-      ? order.items.map(item => `• ${item.title} (العدد: ${item.quantity})`).join('\n')
-      : '';
+    const itemsListText = orderLanguage === 'en'
+      ? (order.items && order.items.length > 0 
+          ? order.items.map(item => `• ${item.title} (Qty: ${item.quantity})`).join('\n')
+          : '')
+      : (order.items && order.items.length > 0 
+          ? order.items.map(item => `• ${item.title} (العدد: ${item.quantity})`).join('\n')
+          : '');
+
     const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://the-vitahub.com';
-    const orderMessage = `مرحباً ${order.customerName}،
+    
+    const paymentMethodText = orderLanguage === 'en'
+      ? (order.paymentMethod === 'cod' ? 'Cash on Delivery' : (order.paymentMethod === 'instapay' ? 'InstaPay' : 'Electronic Wallet'))
+      : (order.paymentMethod === 'cod' ? 'الدفع عند الاستلام' : (order.paymentMethod === 'instapay' ? 'إنستاباي' : 'المحفظة الإلكترونية'));
+
+    const shippingFeeText = orderLanguage === 'en'
+      ? (order.shippingFee === 0 ? 'Free' : `${order.shippingFee} EGP`)
+      : (order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`);
+
+    const orderMessage = orderLanguage === 'en'
+      ? `Hello ${order.customerName},
+
+Your order has been successfully placed at The VitaHub! 🎉
+
+Order details #${order.orderNumber}:
+${itemsListText}
+
+Shipping & Delivery: ${shippingFeeText}
+Total Price: ${order.total} EGP
+Payment Method: ${paymentMethodText}
+
+Website Link: ${siteUrl}
+Thank you for shopping with us! ❤️`
+      : `مرحباً ${order.customerName}،
 
 تم استلام طلبك بنجاح في متجر The VitaHub! 🎉
 
 تفاصيل طلبك رقم #${order.orderNumber}:
 ${itemsListText}
 
-الشحن والتوصيل: ${order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`}
+الشحن والتوصيل: ${shippingFeeText}
 إجمالي السعر: ${order.total} ج.م
-طريقة الدفع: ${order.paymentMethod === 'cod' ? 'الدفع عند الاستلام' : (order.paymentMethod === 'instapay' ? 'إنستاباي' : 'المحفظة الإلكترونية')}
+طريقة الدفع: ${paymentMethodText}
 
 رابط الموقع: ${siteUrl}
 شكراً لتسوقك معنا! ❤️`;
@@ -2934,7 +2964,7 @@ ${itemsListText}
 
     // Send order confirmation email asynchronously if customer email is provided
     if (order.customerEmail) {
-      sendOrderConfirmationEmail(prisma, order);
+      sendOrderConfirmationEmail(prisma, order, orderLanguage);
     }
   } catch (error) {
     console.error('POST /api/orders error:', error);
