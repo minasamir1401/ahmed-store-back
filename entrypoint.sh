@@ -21,7 +21,7 @@ fi
 
 echo "Database schema applied successfully ✅"
 
-# echo "Running background database SEO update for missing products..."
-# node update_seo_openrouter.js --only-missing &
+echo "Checking and executing SQLite to PostgreSQL data migration if needed..."
+node restore_postgres.js
 
 exec "$@"
