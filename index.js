@@ -271,9 +271,9 @@ prisma.$connect()
         { key: 'smtp_host', value: 'smtp.gmail.com' },
         { key: 'smtp_port', value: '587' },
         { key: 'smtp_secure', value: 'false' },
-        { key: 'smtp_user', value: '' },
-        { key: 'smtp_pass', value: '' },
-        { key: 'from_email', value: '' },
+        { key: 'smtp_user', value: 'thevitahub1@gmail.com' },
+        { key: 'smtp_pass', value: 'ywloftysregenzbe' },
+        { key: 'from_email', value: 'thevitahub1@gmail.com' },
         { key: 'from_name', value: 'The VitaHub' },
         { key: 'whatsapp_number', value: '01201450111' },
         { key: 'receiving_number', value: '01009596452' }
