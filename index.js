@@ -440,78 +440,7 @@ const excelUpload = multer({
   }
 });
 
-// ── Upload Endpoints ──────────────────────────────────────────
-app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  try {
-    if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
-    const altText = resolveImageAlt(req.body, req.file);
-    const uploadType = req.query.type || req.body.type;
-    const optimized = await optimizeImage(req.file, uploadType);
-    const uniqueSuffix = crypto.randomBytes(6).toString('hex');
-    const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
-    
-    // Save file to the uploads directory
-    const uploadPath = path.join(__dirname, 'uploads', fileName);
-    fs.writeFileSync(uploadPath, optimized.data);
-    
-    const imageUrl = `/uploads/${fileName}`;
-
-    res.json({
-      id: uniqueSuffix,
-      url: imageUrl,
-      thumbnailUrl: imageUrl,
-      altText,
-      width: optimized.width,
-      height: optimized.height,
-      size: optimized.size
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/upload-multiple', adminAuthenticate, upload.array('images', 10), async (req, res) => {
-  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
-  try {
-    const urls = [];
-    for (const file of req.files) {
-      if (!isAllowedImageBuffer(file)) return res.status(400).json({ error: 'Invalid image content' });
-      const altText = resolveImageAlt(req.body, file);
-      const optimized = await optimizeImage(file);
-      const uniqueSuffix = crypto.randomBytes(6).toString('hex');
-      const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
-      
-      // Save file to the uploads directory
-      const uploadPath = path.join(__dirname, 'uploads', fileName);
-      fs.writeFileSync(uploadPath, optimized.data);
-      
-      urls.push(`/uploads/${fileName}`);
-    }
-    res.json({ urls });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/images/:id/meta', (req, res) => {
-  res.status(404).json({ error: 'Legacy ImageStore is deprecated. Please use /uploads/' });
-});
-
-// Reusable placeholder SVG for missing/broken images
-const PLACEHOLDER_SVG = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><rect width="400" height="400" fill="#f1f5f9"/><rect x="140" y="130" width="120" height="100" rx="8" fill="#cbd5e1"/><circle cx="170" cy="155" r="12" fill="#94a3b8"/><polygon points="140,230 185,175 215,205 240,185 260,230" fill="#94a3b8"/><text x="200" y="270" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#94a3b8">صورة غير متاحة</text></svg>`);
-
-app.get('/api/images/:id/thumb', (req, res) => {
-  res.setHeader('Content-Type', 'image/svg+xml');
-  res.setHeader('Cache-Control', 'public, max-age=60');
-  return res.send(PLACEHOLDER_SVG);
-});
-
-app.get('/api/images/:id', (req, res) => {
-  res.setHeader('Content-Type', 'image/svg+xml');
-  res.setHeader('Cache-Control', 'public, max-age=60');
-  return res.send(PLACEHOLDER_SVG);
-});
+app.use('/api', require('./src/routes/upload.routes'));
 
 // ── AI Endpoints ──────────────────────────────────────────────
 function generateMockFAQs(productTitle) {
