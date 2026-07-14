@@ -26,8 +26,8 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
     const port = parseInt(await getSetting(prisma, 'smtp_port', '587'), 10);
     const secureSetting = await getSetting(prisma, 'smtp_secure', 'false');
     const secure = secureSetting === 'true';
-    const user = await getSetting(prisma, 'smtp_user', '');
-    const pass = await getSetting(prisma, 'smtp_pass', '');
+    const user = await getSetting(prisma, 'smtp_user', 'the.vitaminshub@gmail.com');
+    const pass = await getSetting(prisma, 'smtp_pass', 'xrnd iepd yhlo bjst');
     const fromEmail = await getSetting(prisma, 'from_email', user);
     const fromName = await getSetting(prisma, 'from_name', 'The VitaHub');
     const whatsappNumber = await getSetting(prisma, 'whatsapp_number', '01201450111');

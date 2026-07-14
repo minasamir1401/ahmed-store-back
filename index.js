@@ -266,25 +266,25 @@ prisma.$connect()
         console.log('Default admin user created successfully ✅');
       }
 
-      // Seed default settings if they do not exist
+      // Seed default settings if they do not exist (forced updates via upsert)
       const defaultSettings = [
         { key: 'smtp_host', value: 'smtp.gmail.com' },
         { key: 'smtp_port', value: '587' },
         { key: 'smtp_secure', value: 'false' },
-        { key: 'smtp_user', value: 'minasamir1q1@gmail.com' },
-        { key: 'smtp_pass', value: 'ywloftysregenzbe' },
-        { key: 'from_email', value: 'minasamir1q1@gmail.com' },
+        { key: 'smtp_user', value: 'the.vitaminshub@gmail.com' },
+        { key: 'smtp_pass', value: 'xrnd iepd yhlo bjst' },
+        { key: 'from_email', value: 'the.vitaminshub@gmail.com' },
         { key: 'from_name', value: 'The VitaHub' },
         { key: 'whatsapp_number', value: '01201450111' },
         { key: 'receiving_number', value: '01009596452' }
       ];
 
       for (const setting of defaultSettings) {
-        const exists = await prisma.setting.findUnique({ where: { key: setting.key } });
-        if (!exists) {
-          await prisma.setting.create({ data: setting });
-          console.log(`Seeded default setting: ${setting.key} = ${setting.value}`);
-        }
+        await prisma.setting.upsert({
+          where: { key: setting.key },
+          update: { value: setting.value },
+          create: { key: setting.key, value: setting.value }
+        });
       }
     } catch (err) {
       console.error('Error seeding default admin/settings:', err);
