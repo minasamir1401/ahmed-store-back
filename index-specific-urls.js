@@ -2,8 +2,15 @@ const { notifyGoogleIndexing } = require('./src/services/googleIndexingService')
 require('dotenv').config();
 
 const urls = [
-  'https://the-vitahub.com/product/cmqfiiw5n0005lh01k884ra73',
-  'https://the-vitahub.com/product/cmqfidref0002lh012wnto2g3'
+  'https://the-vitahub.com/',
+  'https://the-vitahub.com/products',
+  'https://the-vitahub.com/categories',
+  'https://the-vitahub.com/offers',
+  'https://the-vitahub.com/brands',
+  'https://the-vitahub.com/health-tips',
+  'https://the-vitahub.com/bmi-calculator',
+  'https://the-vitahub.com/about',
+  'https://the-vitahub.com/faq',
 ];
 
 async function run() {

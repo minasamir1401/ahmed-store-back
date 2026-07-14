@@ -266,6 +266,26 @@ async function main() {
     }
   }
 
+  // 10. Migrate IndexingLogs
+  if (data.indexingLog && data.indexingLog.length > 0) {
+    console.log(`Migrating ${data.indexingLog.length} indexing logs...`);
+    for (const log of data.indexingLog) {
+      await prisma.indexingLog.upsert({
+        where: { id: log.id },
+        update: {},
+        create: {
+          id: log.id,
+          url: log.url,
+          action: log.action,
+          status: log.status,
+          response: log.response,
+          createdAt: new Date(log.createdAt)
+        }
+      });
+    }
+  }
+
+
   console.log('Data migration to PostgreSQL completed successfully! 🎉');
   
   // Rename backup file so it doesn't run again on next start

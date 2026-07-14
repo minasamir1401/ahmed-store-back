@@ -3074,7 +3074,9 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
       'order',
       'orderItem',
       'imageStore',
-      'medicalTip'
+      'medicalTip',
+      'setting',
+      'indexingLog'
     ];
 
     const dbData = {};
@@ -3167,7 +3169,9 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
       'order',
       'orderItem',
       'imageStore',
-      'medicalTip'
+      'medicalTip',
+      'setting',
+      'indexingLog'
     ];
 
     const availableTables = {};
@@ -3195,6 +3199,8 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
       if (availableTables.medicalTip) await tx.medicalTip.deleteMany();
       if (availableTables.imageStore) await tx.imageStore.deleteMany();
       if (availableTables.user) await tx.user.deleteMany();
+      if (availableTables.setting) await tx.setting.deleteMany();
+      if (availableTables.indexingLog) await tx.indexingLog.deleteMany();
 
       // 2. Insert records in dependency order (if available)
       if (availableTables.user && dbData.user && dbData.user.length > 0) {
@@ -3235,6 +3241,14 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
 
       if (availableTables.medicalTip && dbData.medicalTip && dbData.medicalTip.length > 0) {
         await tx.medicalTip.createMany({ data: dbData.medicalTip });
+      }
+
+      if (availableTables.setting && dbData.setting && dbData.setting.length > 0) {
+        await tx.setting.createMany({ data: dbData.setting });
+      }
+
+      if (availableTables.indexingLog && dbData.indexingLog && dbData.indexingLog.length > 0) {
+        await tx.indexingLog.createMany({ data: dbData.indexingLog });
       }
 
       if (availableTables.imageStore && dbData.imageStore && dbData.imageStore.length > 0) {
