@@ -225,3 +225,16 @@ model Setting {
   updatedAt DateTime @updatedAt
 }
 
+model PixelEvent {
+  id          String   @id @default(cuid())
+  eventName   String
+  url         String?
+  customerIp  String?
+  userAgent   String?
+  metadata    String?  // JSON string containing detailed event data (like product title, price, etc.)
+  createdAt   DateTime @default(now())
+
+  @@index([eventName])
+  @@index([createdAt])
+}
+

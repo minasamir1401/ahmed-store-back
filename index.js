@@ -3707,6 +3707,111 @@ async function runAutoCleanup() {
   }
 }
 
+// ── Pixel Tracking & Analytics Routes ───────────────────────────
+app.post('/api/pixel-events', optionalAuthenticate, asyncHandler(async (req, res) => {
+  const { eventName, url, metadata } = req.body;
+  if (!eventName) {
+    return res.status(400).json({ error: 'Event name is required' });
+  }
+
+  const customerIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+  const userAgent = req.headers['user-agent'] || '';
+
+  const event = await prisma.pixelEvent.create({
+    data: {
+      eventName: normalizeString(eventName, 100),
+      url: url ? normalizeString(url, 2048) : null,
+      customerIp: typeof customerIp === 'string' ? normalizeString(customerIp, 100) : null,
+      userAgent: typeof userAgent === 'string' ? normalizeString(userAgent, 500) : null,
+      metadata: metadata ? JSON.stringify(metadata) : null
+    }
+  });
+
+  res.status(201).json({ success: true, eventId: event.id });
+}));
+
+app.get('/api/admin/pixel-events', adminAuthenticate, asyncHandler(async (req, res) => {
+  const limit = parsePositiveInt(req.query.limit, 100, 1000);
+  const offset = parsePositiveInt(req.query.offset, 0, 100000);
+  const search = req.query.search || '';
+
+  const where = {};
+  if (search) {
+    where.OR = [
+      { eventName: { contains: search, mode: 'insensitive' } },
+      { url: { contains: search, mode: 'insensitive' } },
+      { customerIp: { contains: search, mode: 'insensitive' } },
+      { metadata: { contains: search, mode: 'insensitive' } }
+    ];
+  }
+
+  const [events, total] = await Promise.all([
+    prisma.pixelEvent.findMany({
+      where,
+      take: limit,
+      skip: offset,
+      orderBy: { createdAt: 'desc' }
+    }),
+    prisma.pixelEvent.count({ where })
+  ]);
+
+  res.json({ events, total });
+}));
+
+app.get('/api/admin/pixel-stats', adminAuthenticate, asyncHandler(async (req, res) => {
+  try {
+    const aggregations = await prisma.pixelEvent.groupBy({
+      by: ['eventName'],
+      _count: {
+        _all: true
+      }
+    });
+
+    const uniqueIps = await prisma.pixelEvent.findMany({
+      select: { customerIp: true },
+      distinct: ['customerIp'],
+    });
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentEvents = await prisma.pixelEvent.findMany({
+      where: {
+        createdAt: {
+          gte: thirtyDaysAgo
+        }
+      },
+      select: {
+        eventName: true,
+        createdAt: true
+      }
+    });
+
+    const dailyStats = {};
+    recentEvents.forEach(e => {
+      const day = e.createdAt.toISOString().slice(0, 10);
+      if (!dailyStats[day]) {
+        dailyStats[day] = { date: day, PageView: 0, ViewContent: 0, AddToCart: 0, InitiateCheckout: 0, Purchase: 0, total: 0 };
+      }
+      const evt = e.eventName;
+      if (dailyStats[day][evt] !== undefined) {
+        dailyStats[day][evt]++;
+      }
+      dailyStats[day].total++;
+    });
+
+    const chartData = Object.values(dailyStats).sort((a, b) => a.date.localeCompare(b.date));
+
+    res.json({
+      eventCounts: aggregations.map(a => ({ eventName: a.eventName, count: a._count._all })),
+      uniqueVisitors: uniqueIps.filter(ip => ip.customerIp).length,
+      chartData
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}));
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   initWhatsApp();
