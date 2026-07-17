@@ -2877,6 +2877,69 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     });
     res.status(201).json(order);
 
+    // ── Meta Conversions API (CAPI) Server-Side Purchase Dispatch ──
+    try {
+      const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+      const userAgent = req.headers['user-agent'] || '';
+      const fbp = req.body.fbp || null;
+      const fbc = req.body.fbc || null;
+      const orderSourceUrl = req.headers.referer || 'https://the-vitahub.com/checkout';
+
+      // Record the Purchase event in PixelEvent table for analytics
+      await prisma.pixelEvent.create({
+        data: {
+          eventName: 'Purchase',
+          url: orderSourceUrl ? normalizeString(orderSourceUrl, 2048) : null,
+          customerIp: typeof customerIp === 'string' ? normalizeString(customerIp, 100) : null,
+          userAgent: typeof userAgent === 'string' ? normalizeString(userAgent, 500) : null,
+          metadata: JSON.stringify({
+            orderNumber: order.orderNumber,
+            total: order.total,
+            currency: 'EGP',
+            items: order.items,
+            customerName: order.customerName,
+            customerPhone: order.customerPhone,
+            customerEmail: order.customerEmail,
+            governorate: order.governorate,
+            eventId: order.orderNumber,
+            fbp,
+            fbc
+          })
+        }
+      });
+
+      // Send Purchase event directly to Meta Conversions API (CAPI) using orderNumber as deduplication event_id
+      await sendConversionsApiEvent({
+        eventName: 'Purchase',
+        eventId: order.orderNumber,
+        eventSourceUrl: orderSourceUrl,
+        customerIp,
+        userAgent,
+        fbp,
+        fbc,
+        customData: {
+          currency: 'EGP',
+          value: Number(order.total) || 0,
+          order_id: order.orderNumber,
+          contents: (order.items || []).map(item => ({
+            id: String(item.productId || item.id || ''),
+            quantity: Number(item.quantity) || 1,
+            item_price: Number(item.price) || 0
+          })),
+          content_type: 'product',
+          num_items: (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0)
+        },
+        userData: {
+          name: order.customerName,
+          phone: order.customerPhone,
+          email: order.customerEmail,
+          city: order.governorate
+        }
+      });
+    } catch (capiErr) {
+      console.error('Error dispatching server-side CAPI Purchase event:', capiErr);
+    }
+
     // Send order confirmation message via WhatsApp asynchronously
     const itemsListText = orderLanguage === 'en'
       ? (order.items && order.items.length > 0 
@@ -3707,15 +3770,138 @@ async function runAutoCleanup() {
   }
 }
 
+// ── Meta Conversions API (CAPI) Helper ───────────────────────────
+const sendConversionsApiEvent = async ({
+  eventName,
+  eventId,
+  eventSourceUrl = 'https://the-vitahub.com/',
+  customerIp = '',
+  userAgent = '',
+  fbp = null,
+  fbc = null,
+  customData = {},
+  userData = {}
+}) => {
+  try {
+    const pixelId = process.env.META_PIXEL_ID || '2785073648526058';
+    const accessToken = process.env.META_ACCESS_TOKEN || process.env.META_CAPI_TOKEN || process.env.META_PIXEL_ACCESS_TOKEN || '';
+    if (!pixelId || !accessToken) {
+      return { success: false, reason: 'META_ACCESS_TOKEN or META_PIXEL_ID not configured on server' };
+    }
+
+    const hashSha256 = (str) => {
+      if (!str || typeof str !== 'string') return null;
+      const clean = str.trim().toLowerCase();
+      if (!clean) return null;
+      return crypto.createHash('sha256').update(clean).digest('hex');
+    };
+
+    const hashPhoneSha256 = (phone) => {
+      if (!phone || typeof phone !== 'string') return null;
+      let digits = phone.replace(/\D/g, '');
+      if (!digits) return null;
+      if (digits.startsWith('01') && digits.length === 11) {
+        digits = '20' + digits.substring(1);
+      } else if (digits.startsWith('1') && digits.length === 10) {
+        digits = '20' + digits;
+      } else if (digits.startsWith('0020')) {
+        digits = digits.substring(2);
+      }
+      return crypto.createHash('sha256').update(digits).digest('hex');
+    };
+
+    const user_data = {};
+
+    const emHash = hashSha256(userData.email || userData.customerEmail);
+    if (emHash) user_data.em = [emHash];
+
+    const phHash = hashPhoneSha256(userData.phone || userData.customerPhone);
+    if (phHash) user_data.ph = [phHash];
+
+    const fullName = (userData.name || userData.customerName || '').trim();
+    if (fullName) {
+      const parts = fullName.split(/\s+/);
+      const fnHash = hashSha256(parts[0]);
+      if (fnHash) user_data.fn = [fnHash];
+      if (parts.length > 1) {
+        const lnHash = hashSha256(parts.slice(1).join(' '));
+        if (lnHash) user_data.ln = [lnHash];
+      }
+    }
+
+    const ctHash = hashSha256(userData.city || userData.governorate);
+    if (ctHash) user_data.ct = [ctHash];
+
+    user_data.co = [crypto.createHash('sha256').update('eg').digest('hex')];
+
+    if (customerIp && typeof customerIp === 'string') {
+      const cleanIp = customerIp.split(',')[0].trim();
+      if (cleanIp && cleanIp !== '::1' && cleanIp !== '127.0.0.1') {
+        user_data.client_ip_address = cleanIp;
+      }
+    }
+    if (userAgent && typeof userAgent === 'string') {
+      user_data.client_user_agent = userAgent;
+    }
+    if (fbp && typeof fbp === 'string') {
+      user_data.fbp = fbp;
+    }
+    if (fbc && typeof fbc === 'string') {
+      user_data.fbc = fbc;
+    }
+
+    const payload = {
+      data: [
+        {
+          event_name: eventName,
+          event_time: Math.floor(Date.now() / 1000),
+          action_source: 'website',
+          event_source_url: eventSourceUrl || 'https://the-vitahub.com/',
+          event_id: eventId ? String(eventId) : undefined,
+          user_data,
+          custom_data: customData || {}
+        }
+      ]
+    };
+
+    const response = await fetch(`https://graph.facebook.com/v19.0/${pixelId}/events?access_token=${accessToken}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+    if (!response.ok) {
+      console.error(`[Meta CAPI Error] Event "${eventName}" (${eventId}):`, result);
+      return { success: false, error: result };
+    }
+    console.log(`[Meta CAPI Success] Event "${eventName}" (${eventId}) dispatched. Events received: ${result.events_received}`);
+    return { success: true, result };
+  } catch (error) {
+    console.error(`[Meta CAPI Exception] Event "${eventName}":`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
 // ── Pixel Tracking & Analytics Routes ───────────────────────────
 app.post('/api/pixel-events', optionalAuthenticate, asyncHandler(async (req, res) => {
-  const { eventName, url, metadata } = req.body;
+  const { eventName, url, metadata, eventId, fbp, fbc } = req.body;
   if (!eventName) {
     return res.status(400).json({ error: 'Event name is required' });
   }
 
-  const customerIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+  const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
   const userAgent = req.headers['user-agent'] || '';
+
+  const metaObj = metadata && typeof metadata === 'object' ? metadata : (metadata ? { rawMetadata: metadata } : {});
+  const storedMetadata = JSON.stringify({
+    ...metaObj,
+    ...(eventId ? { eventId } : {}),
+    ...(fbp ? { fbp } : {}),
+    ...(fbc ? { fbc } : {})
+  });
 
   const event = await prisma.pixelEvent.create({
     data: {
@@ -3723,9 +3909,56 @@ app.post('/api/pixel-events', optionalAuthenticate, asyncHandler(async (req, res
       url: url ? normalizeString(url, 2048) : null,
       customerIp: typeof customerIp === 'string' ? normalizeString(customerIp, 100) : null,
       userAgent: typeof userAgent === 'string' ? normalizeString(userAgent, 500) : null,
-      metadata: metadata ? JSON.stringify(metadata) : null
+      metadata: storedMetadata
     }
   });
+
+  // For non-Purchase events, dispatch via server-to-server CAPI immediately.
+  // Purchase is already handled inside POST /api/orders once order creation succeeds.
+  if (eventName !== 'Purchase') {
+    let customData = {};
+    if (metadata && typeof metadata === 'object') {
+      if (metadata.value || metadata.price) {
+        customData.value = Number(metadata.value || metadata.price) || 0;
+        customData.currency = 'EGP';
+      }
+      if (metadata.title || metadata.content_name) {
+        customData.content_name = metadata.title || metadata.content_name;
+      }
+      if (metadata.id || (metadata.content_ids && Array.isArray(metadata.content_ids))) {
+        customData.content_ids = metadata.content_ids || [metadata.id];
+        customData.content_type = 'product';
+      }
+      if (metadata.search_string || metadata.query) {
+        customData.search_string = metadata.search_string || metadata.query;
+      }
+      if (metadata.cart && Array.isArray(metadata.cart)) {
+        customData.contents = metadata.cart.map(i => ({
+          id: String(i.id || ''),
+          quantity: Number(i.quantity) || 1,
+          item_price: Number(i.price) || 0
+        }));
+        customData.num_items = metadata.cart.reduce((sum, i) => sum + (Number(i.quantity) || 1), 0);
+      }
+    }
+
+    sendConversionsApiEvent({
+      eventName,
+      eventId: eventId || event.id,
+      eventSourceUrl: url || 'https://the-vitahub.com/',
+      customerIp,
+      userAgent,
+      fbp,
+      fbc,
+      customData,
+      userData: req.user ? {
+        name: req.user.name,
+        email: req.user.email,
+        phone: req.user.phone,
+        city: req.user.governorate
+      } : {}
+    }).catch(err => console.error(`Error sending CAPI ${eventName} event:`, err));
+  }
 
   res.status(201).json({ success: true, eventId: event.id });
 }));
