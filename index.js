@@ -843,6 +843,18 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
       "answer_ar": "إجابة احترافية 3 بالعربية.",
       "question_en": "Question 3 in English?",
       "answer_en": "Professional answer 3 in English."
+    },
+    {
+      "question_ar": "سؤال شائع 4 بالعربية؟",
+      "answer_ar": "إجابة احترافية 4 بالعربية.",
+      "question_en": "Question 4 in English?",
+      "answer_en": "Professional answer 4 in English."
+    },
+    {
+      "question_ar": "سؤال شائع 5 بالعربية؟",
+      "answer_ar": "إجابة احترافية 5 بالعربية.",
+      "question_en": "Question 5 in English?",
+      "answer_en": "Professional answer 5 in English."
     }
   ]
 }`;
@@ -3250,69 +3262,36 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
 
     // Restore Database records inside a Transaction
     await prisma.$transaction(async (tx) => {
-      // 1. Delete all tables in reverse dependency order (if available)
-      if (availableTables.orderItem) await tx.orderItem.deleteMany();
-      if (availableTables.order) await tx.order.deleteMany();
-      if (availableTables.product) await tx.product.deleteMany();
-      if (availableTables.category) await tx.category.deleteMany();
-      if (availableTables.brand) await tx.brand.deleteMany();
-      if (availableTables.offer) await tx.offer.deleteMany();
-      if (availableTables.blog) await tx.blog.deleteMany();
-      if (availableTables.hero) await tx.hero.deleteMany();
-      if (availableTables.medicalTip) await tx.medicalTip.deleteMany();
-      if (availableTables.imageStore) await tx.imageStore.deleteMany();
-      if (availableTables.user) await tx.user.deleteMany();
-      if (availableTables.setting) await tx.setting.deleteMany();
-      if (availableTables.indexingLog) await tx.indexingLog.deleteMany();
+      const upsertData = async (model, dataArray, idField = 'id') => {
+        if (!dataArray || dataArray.length === 0) return;
+        for (const item of dataArray) {
+          const whereClause = {};
+          whereClause[idField] = item[idField];
+          try {
+            await model.upsert({
+              where: whereClause,
+              update: item,
+              create: item
+            });
+          } catch (e) {
+            console.error(`Failed to upsert for ${item[idField]}:`, e.message);
+          }
+        }
+      };
 
-      // 2. Insert records in dependency order (if available)
-      if (availableTables.user && dbData.user && dbData.user.length > 0) {
-        await tx.user.createMany({ data: dbData.user });
-      }
-      
-      if (availableTables.category && dbData.category && dbData.category.length > 0) {
-        await tx.category.createMany({ data: dbData.category });
-      }
-
-      if (availableTables.brand && dbData.brand && dbData.brand.length > 0) {
-        await tx.brand.createMany({ data: dbData.brand });
-      }
-
-      if (availableTables.product && dbData.product && dbData.product.length > 0) {
-        await tx.product.createMany({ data: dbData.product });
-      }
-
-      if (availableTables.order && dbData.order && dbData.order.length > 0) {
-        await tx.order.createMany({ data: dbData.order });
-      }
-
-      if (availableTables.orderItem && dbData.orderItem && dbData.orderItem.length > 0) {
-        await tx.orderItem.createMany({ data: dbData.orderItem });
-      }
-
-      if (availableTables.offer && dbData.offer && dbData.offer.length > 0) {
-        await tx.offer.createMany({ data: dbData.offer });
-      }
-
-      if (availableTables.blog && dbData.blog && dbData.blog.length > 0) {
-        await tx.blog.createMany({ data: dbData.blog });
-      }
-
-      if (availableTables.hero && dbData.hero && dbData.hero.length > 0) {
-        await tx.hero.createMany({ data: dbData.hero });
-      }
-
-      if (availableTables.medicalTip && dbData.medicalTip && dbData.medicalTip.length > 0) {
-        await tx.medicalTip.createMany({ data: dbData.medicalTip });
-      }
-
-      if (availableTables.setting && dbData.setting && dbData.setting.length > 0) {
-        await tx.setting.createMany({ data: dbData.setting });
-      }
-
-      if (availableTables.indexingLog && dbData.indexingLog && dbData.indexingLog.length > 0) {
-        await tx.indexingLog.createMany({ data: dbData.indexingLog });
-      }
+      // Upsert records in dependency order (if available)
+      if (availableTables.user) await upsertData(tx.user, dbData.user);
+      if (availableTables.category) await upsertData(tx.category, dbData.category);
+      if (availableTables.brand) await upsertData(tx.brand, dbData.brand);
+      if (availableTables.product) await upsertData(tx.product, dbData.product);
+      if (availableTables.order) await upsertData(tx.order, dbData.order);
+      if (availableTables.orderItem) await upsertData(tx.orderItem, dbData.orderItem);
+      if (availableTables.offer) await upsertData(tx.offer, dbData.offer);
+      if (availableTables.blog) await upsertData(tx.blog, dbData.blog);
+      if (availableTables.hero) await upsertData(tx.hero, dbData.hero);
+      if (availableTables.medicalTip) await upsertData(tx.medicalTip, dbData.medicalTip);
+      if (availableTables.setting) await upsertData(tx.setting, dbData.setting, 'key');
+      if (availableTables.indexingLog) await upsertData(tx.indexingLog, dbData.indexingLog);
 
       if (availableTables.imageStore && dbData.imageStore && dbData.imageStore.length > 0) {
         // Resolve binaries from ZIP first
@@ -3332,8 +3311,11 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
           data: item.data ? (Buffer.isBuffer(item.data) ? item.data : Buffer.from(item.data.data || item.data)) : undefined,
           thumbnailData: item.thumbnailData ? (Buffer.isBuffer(item.thumbnailData) ? item.thumbnailData : Buffer.from(item.thumbnailData.data || item.thumbnailData)) : undefined
         }));
-        await tx.imageStore.createMany({ data: imageStoresToInsert });
+        await upsertData(tx.imageStore, imageStoresToInsert);
       }
+    }, {
+      maxWait: 10000,
+      timeout: 120000 // Give it 2 minutes since upserting takes longer
     });
 
     res.json({ message: 'Backup restored successfully' });
