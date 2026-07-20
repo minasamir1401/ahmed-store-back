@@ -1717,7 +1717,9 @@ app.get('/api/settings', async (req, res) => {
   try {
     const whatsapp_number = await getSetting(prisma, 'whatsapp_number', '01201450111');
     const receiving_number = await getSetting(prisma, 'receiving_number', '01009596452');
-    res.json({ whatsapp_number, receiving_number });
+    const shipping_rates = await getSetting(prisma, 'shipping_rates', '{}');
+    const return_policy = await getSetting(prisma, 'return_policy', '');
+    res.json({ whatsapp_number, receiving_number, shipping_rates, return_policy });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1728,7 +1730,8 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
     const keys = [
       'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
       'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number'
+      'whatsapp_number', 'receiving_number',
+      'shipping_rates', 'return_policy'
     ];
     const settings = {};
     for (const key of keys) {
@@ -1754,7 +1757,8 @@ app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
     const keys = [
       'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
       'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number'
+      'whatsapp_number', 'receiving_number',
+      'shipping_rates', 'return_policy'
     ];
     for (const key of keys) {
       if (data[key] !== undefined) {
