@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -38,9 +38,20 @@ async function initWhatsApp() {
       fs.mkdirSync(parentDir, { recursive: true });
     }
 
+    // Fetch the latest WhatsApp version to avoid 405 Method Not Allowed error
+    let version = [2, 3000, 1017531287];
+    try {
+      const { version: latestVersion } = await fetchLatestBaileysVersion();
+      version = latestVersion;
+      console.log(`Successfully fetched latest WhatsApp version: ${version.join('.')}`);
+    } catch (err) {
+      console.warn('Failed to fetch latest WhatsApp version, using default fallback:', err);
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
     sock = makeWASocket({
+      version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
