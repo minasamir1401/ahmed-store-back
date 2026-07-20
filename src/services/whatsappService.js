@@ -1,11 +1,12 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const qrcode = require('qrcode-terminal');
 
-const authPath = process.env.WHATSAPP_AUTH_PATH || path.join(__dirname, '.wwebjs_auth');
+const authPath = process.env.WHATSAPP_AUTH_PATH || path.join(__dirname, '..', '..', '.baileys_auth');
 
-let client = null;
+let sock = null;
 let qrCode = null;
 let status = 'disconnected'; // 'disconnected', 'initializing', 'qr', 'connected'
 
@@ -18,79 +19,62 @@ function convertArabicNums(str) {
   return str.replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 }
 
-function initWhatsApp() {
-  if (client) {
+async function initWhatsApp() {
+  if (sock) {
     try {
-      client.destroy();
+      sock.end();
     } catch (e) {
-      console.error('Error destroying existing client:', e);
+      console.error('Error ending existing socket:', e);
     }
   }
 
   status = 'initializing';
   qrCode = null;
-  console.log('Initializing WhatsApp Client...');
+  console.log('Initializing WhatsApp Baileys Client...');
 
   try {
-    // Ensure parent directory for dataPath exists
     const parentDir = path.dirname(authPath);
     if (!fs.existsSync(parentDir)) {
       fs.mkdirSync(parentDir, { recursive: true });
     }
 
-    client = new Client({
-      authStrategy: new LocalAuth({
-        dataPath: authPath
-      }),
-      puppeteer: {
-        headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || (process.platform === 'linux' ? '/usr/bin/chromium-browser' : undefined),
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu'
-        ],
-        protocolTimeout: 180000
+    const { state, saveCreds } = await useMultiFileAuthState(authPath);
+
+    sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'silent' }),
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        console.log('=== WhatsApp QR Code Received ===');
+        qrcode.generate(qr, { small: true });
+        qrCode = qr;
+        status = 'qr';
+      }
+
+      if (connection === 'close') {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        console.log('WhatsApp connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
+        status = 'disconnected';
+        qrCode = null;
+        if (shouldReconnect) {
+          setTimeout(() => initWhatsApp(), 5000);
+        } else {
+          console.log('Logged out of WhatsApp. Clear session and restart to generate new QR.');
+        }
+      } else if (connection === 'open') {
+        console.log('WhatsApp Client is Ready and Connected! 🎉');
+        status = 'connected';
+        qrCode = null;
       }
     });
 
-    client.on('qr', (qr) => {
-      console.log('=== WhatsApp QR Code Received ===');
-      qrcode.generate(qr, { small: true });
-      qrCode = qr;
-      status = 'qr';
-    });
-
-    client.on('ready', () => {
-      console.log('WhatsApp Client is Ready and Connected! 🎉');
-      status = 'connected';
-      qrCode = null;
-    });
-
-    client.on('authenticated', () => {
-      console.log('WhatsApp Client Authenticated!');
-    });
-
-    client.on('auth_failure', (msg) => {
-      console.error('WhatsApp Authentication Failure:', msg);
-      status = 'disconnected';
-      qrCode = null;
-    });
-
-    client.on('disconnected', (reason) => {
-      console.log('WhatsApp Client was Disconnected:', reason);
-      status = 'disconnected';
-      qrCode = null;
-      // Re-initialize after delay
-      setTimeout(() => initWhatsApp(), 5000);
-    });
-
-    client.initialize().catch(err => {
-      console.error('Failed to initialize WhatsApp client:', err);
-      status = 'disconnected';
-    });
   } catch (error) {
     console.error('Error starting WhatsApp client:', error);
     status = 'disconnected';
@@ -100,17 +84,14 @@ function initWhatsApp() {
 async function logoutWhatsApp() {
   console.log('Logging out of WhatsApp...');
   try {
-    if (client) {
-      if (status === 'connected') {
-        await client.logout();
-      }
-      await client.destroy();
+    if (sock) {
+      await sock.logout();
     }
   } catch (err) {
     console.error('Error during WhatsApp logout:', err);
   }
 
-  // Clear auth session folder just to be sure
+  // Clear auth session folder
   if (fs.existsSync(authPath)) {
     try {
       fs.rmSync(authPath, { recursive: true, force: true });
@@ -122,19 +103,19 @@ async function logoutWhatsApp() {
 
   status = 'disconnected';
   qrCode = null;
-  client = null;
+  sock = null;
 
-  // Restart client so it generates a new QR code
+  // Restart client
   initWhatsApp();
 }
 
 async function sendWhatsAppMessage(phone, message) {
-  if (!client || status !== 'connected') {
+  if (!sock || status !== 'connected') {
     console.warn(`WhatsApp not connected (Status: ${status}). Cannot send message to ${phone}`);
     return false;
   }
   try {
-    // If phone contains multiple numbers (e.g. separated by hyphen, slash, comma, or space), take the first one
+    // Clean and format phone number
     let singlePhone = phone;
     if (typeof phone === 'string') {
       const parts = phone.split(/[\s,/\-;_]+/);
@@ -146,39 +127,33 @@ async function sendWhatsAppMessage(phone, message) {
       }
     }
 
-    // Convert Arabic numerals to English numerals
     let cleaned = convertArabicNums(singlePhone);
-
-    // Clean phone number from any spaces, plus signs, brackets or text
     let formattedPhone = cleaned.replace(/\D/g, '');
     
-    // Strip leading 00 if present
     if (formattedPhone.startsWith('00')) {
       formattedPhone = formattedPhone.substring(2);
     }
 
-    // Egyptian numbers starts with 01 and have 11 digits
     if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
       formattedPhone = '20' + formattedPhone.substring(1);
     } else if (formattedPhone.startsWith('20') && formattedPhone.length === 12) {
-      // Already correct Egyptian number with country code, do nothing
+      // Correct
     } else if (formattedPhone.length === 10 && formattedPhone.startsWith('1')) {
-      // Egyptian number without leading zero, add country code
       formattedPhone = '20' + formattedPhone;
     }
+
+    const jid = `${formattedPhone}@s.whatsapp.net`;
+    console.log(`Sending WhatsApp message to jid: ${jid}`);
     
-    console.log(`Resolving WhatsApp ID for ${formattedPhone}...`);
-    const numberDetails = await client.getNumberId(formattedPhone);
-    
-    if (!numberDetails) {
+    // Check if number is on WhatsApp
+    const [result] = await sock.onWhatsApp(jid);
+    if (!result || !result.exists) {
       console.warn(`Phone number ${phone} (${formattedPhone}) is not registered on WhatsApp.`);
       return false;
     }
-    
-    const chatId = numberDetails._serialized;
-    console.log(`Sending WhatsApp message to resolved chatId: ${chatId}`);
-    await client.sendMessage(chatId, message);
-    console.log(`WhatsApp message sent successfully to ${chatId}`);
+
+    await sock.sendMessage(jid, { text: message });
+    console.log(`WhatsApp message sent successfully to ${jid}`);
     return true;
   } catch (error) {
     console.error(`Error sending WhatsApp message to ${phone}:`, error);
