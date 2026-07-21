@@ -539,43 +539,72 @@ function generateMockFAQs(productTitle) {
 }
 
 // ── OpenRouter Model Rotation ───────────────────────────
-// Rotating list of models (prioritizing user's requested free models, then paid fallbacks).
+// Rotating list of valid OpenRouter free models
 const OR_FREE_MODELS = [
-  'openai/gpt-oss-120b:free',
-  'openai/gpt-oss-20b:free',
-  'google/gemini-2.5-flash',
-  'meta-llama/llama-3.1-8b-instruct'
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'google/gemini-2.0-flash-exp:free',
+  'deepseek/deepseek-r1:free',
+  'meta-llama/llama-3.1-8b-instruct:free'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
 
 // Robust JSON parser for AI outputs
 function parseAIJSON(str) {
-  if (typeof str !== 'string') return {};
+  if (typeof str !== 'string' || !str.trim()) return {};
   let cleaned = str.trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (match) cleaned = match[0];
-  cleaned = cleaned.replace(/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
 
-  let insideQuote = false;
-  let result = '';
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  }
+
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  } else {
+    return {};
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e1) {}
+
+  cleaned = cleaned.replace(/,(\s*[\}\]])/g, '$1');
+  try {
+    return JSON.parse(cleaned);
+  } catch (e2) {}
+
+  let insideString = false;
+  let fixedStr = '';
   for (let i = 0; i < cleaned.length; i++) {
     const char = cleaned[i];
-    const isEscaped = i > 0 && cleaned[i - 1] === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
+    const prevChar = i > 0 ? cleaned[i - 1] : '';
+    const isEscaped = prevChar === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
 
     if (char === '"' && !isEscaped) {
-      insideQuote = !insideQuote;
-      result += char;
-    } else if (insideQuote) {
-      if (char === '\n') result += '\\n';
-      else if (char === '\r') result += '\\r';
-      else if (char === '\t') result += '\\t';
-      else result += char;
+      insideString = !insideString;
+      fixedStr += char;
+    } else if (insideString) {
+      if (char === '\n') fixedStr += '\\n';
+      else if (char === '\r') fixedStr += '\\r';
+      else if (char === '\t') fixedStr += '\\t';
+      else fixedStr += char;
     } else {
-      result += char;
+      fixedStr += char;
     }
   }
 
-  return JSON.parse(result);
+  try {
+    return JSON.parse(fixedStr);
+  } catch (e3) {
+    try {
+      const sanitized = fixedStr.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+      return new Function(`return (${sanitized})`)();
+    } catch (e4) {
+      return {};
+    }
+  }
 }
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
