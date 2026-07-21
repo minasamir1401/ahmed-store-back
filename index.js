@@ -1157,70 +1157,48 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   }
   */
 
-  // Support APIFreeLLM directly
-  if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
-    try {
-      const messages = req.body.messages || [];
-      const sysMsg = messages.find(m => m.role === 'system')?.content || '';
-      const userMsg = messages.find(m => m.role === 'user')?.content || '';
-      let prompt = '';
-      if (sysMsg) {
-        prompt += `${sysMsg}\n\n`;
-      }
-      prompt += userMsg;
+  // Function to try APIFreeLLM
+  const tryAPIFree = async () => {
+    const messages = req.body.messages || [];
+    const sysMsg = messages.find(m => m.role === 'system')?.content || '';
+    const userMsg = messages.find(m => m.role === 'user')?.content || '';
+    let prompt = '';
+    if (sysMsg) prompt += `${sysMsg}\n\n`;
+    prompt += userMsg;
 
-      const keysToTry = [];
-      const envKey = process.env.APIFREE_API_KEY || '';
-      if (envKey) keysToTry.push(envKey);
-      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
+    const keysToTry = [];
+    const envKey = process.env.APIFREE_API_KEY || '';
+    if (envKey) keysToTry.push(envKey);
+    keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf');
 
-      const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
-      return res.json({
-        choices: [
-          {
-            message: {
-              role: 'assistant',
-              content: responseText
-            }
-          }
-        ]
-      });
-    } catch (err) {
-      console.error('[APIFreeLLM call failed]', err);
-      if (isFAQRequest) {
-        return fallbackHandler();
-      }
-      return res.status(502).json({ 
-        error: { 
-          message: "فشل الاتصال بـ APIFreeLLM: " + err.message,
-          details: err.message
-        } 
-      });
-    }
-  }
+    const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
+    return res.json({
+      choices: [{ message: { role: 'assistant', content: responseText } }]
+    });
+  };
 
-  try {
+  // Function to try OpenRouter
+  const tryOpenRouter = async () => {
     const apiKey = process.env.OPENROUTER_API_KEY || '';
-    if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
+    if (!apiKey) throw new Error('OPENROUTER_API_KEY missing');
+
     const payload = { ...req.body };
     delete payload.apiKey;
     delete payload.provider;
-
-    // Rotate through free models on rate-limit
-    const modelName = payload.model || OR_FREE_MODELS[orModelIndex];
-    payload.model = modelName;
     delete payload.models;
 
     let lastError = null;
-    let responseData = null;
-    let success = false;
-    let lastStatus = 503;
-    const maxAttempts = OR_FREE_MODELS.length + 3;
+    const maxAttempts = OR_FREE_MODELS.length * 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const currentModel = OR_FREE_MODELS[orModelIndex];
-      // If user explicitly sent a model, honor it on first attempt only
-      payload.model = (attempt === 1 && modelName !== OR_FREE_MODELS[0]) ? modelName : currentModel;
+      payload.model = currentModel;
+
+      // Strip response_format on retry or if provider doesn't support it
+      if (attempt > 1) {
+        delete payload.response_format;
+      }
+
       try {
         console.log(`[OpenRouter] Requesting model: ${payload.model} (Attempt ${attempt}/${maxAttempts})`);
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1232,64 +1210,59 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
           body: JSON.stringify(payload)
         });
 
-        lastStatus = response.status;
-
         if (response.status === 429) {
-          await response.text();
-          console.warn(`[OpenRouter] Model "${payload.model}" rate-limited. Switching...`);
-          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          continue;
-        }
-
-        const contentType = response.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-          const textError = await response.text();
-          console.warn(`[OpenRouter] Non-JSON from "${payload.model}". Switching...`);
+          console.warn(`[OpenRouter] Model "${payload.model}" 429. Switching...`);
           orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
           await new Promise(resolve => setTimeout(resolve, 3000));
           continue;
         }
 
-        const data = await response.json();
-        if (!response.ok) {
-          console.warn(`[OpenRouter] Error ${response.status} from "${payload.model}". Switching...`);
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || !data.choices?.[0]?.message?.content) {
+          const errMsg = data?.error?.message || `Status ${response.status}`;
+          console.warn(`[OpenRouter] Error from "${payload.model}": ${errMsg}. Switching...`);
           orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
 
-        responseData = data;
-        success = true;
-        break;
-      } catch (err) {
+        return res.json(data);
+      } catch (err: any) {
         console.warn(`[OpenRouter] Attempt ${attempt} failed:`, err.message);
         lastError = err;
         orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
+    throw lastError || new Error('All OpenRouter models failed');
+  };
 
-    if (!success) {
-      console.error('[OpenRouter] All attempts failed. Last error:', lastError);
-      if (isFAQRequest) {
-        return fallbackHandler();
+  // Support APIFreeLLM directly with OpenRouter fallback
+  if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
+    try {
+      return await tryAPIFree();
+    } catch (err: any) {
+      console.warn('[APIFreeLLM failed, falling back to OpenRouter]:', err.message);
+      try {
+        return await tryOpenRouter();
+      } catch (orErr: any) {
+        if (isFAQRequest) return fallbackHandler();
+        return res.status(502).json({ error: { message: "فشل التوليد: " + (err.message || orErr.message) } });
       }
-      return res.status(lastStatus).json({ 
-        error: { 
-          message: "فشلت محاولات الاتصال بالذكاء الاصطناعي على النموذج المحدد. يرجى المحاولة لاحقاً.",
-          details: lastError ? lastError.message : undefined
-        } 
-      });
     }
+  }
 
-    res.json(responseData);
-  } catch (error) {
-    console.error('AI Proxy Error:', error);
-    if (isFAQRequest) {
-      return fallbackHandler();
+  // OpenRouter default with APIFreeLLM fallback
+  try {
+    return await tryOpenRouter();
+  } catch (err: any) {
+    console.warn('[OpenRouter failed, falling back to APIFreeLLM]:', err.message);
+    try {
+      return await tryAPIFree();
+    } catch (apiErr: any) {
+      if (isFAQRequest) return fallbackHandler();
+      return res.status(503).json({ error: { message: "تعذر الاتصال بمركز الذكاء الاصطناعي. يرجى إعادة المحاولة." } });
     }
-    res.status(503).json({ error: { message: "تعذر الاتصال بخدمة الذكاء الاصطناعي. يرجى المحاولة لاحقاً." } });
   }
 });
 
