@@ -1227,7 +1227,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
         }
 
         return res.json(data);
-      } catch (err: any) {
+      } catch (err) {
         console.warn(`[OpenRouter] Attempt ${attempt} failed:`, err.message);
         lastError = err;
         orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
@@ -1241,11 +1241,11 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
     try {
       return await tryAPIFree();
-    } catch (err: any) {
+    } catch (err) {
       console.warn('[APIFreeLLM failed, falling back to OpenRouter]:', err.message);
       try {
         return await tryOpenRouter();
-      } catch (orErr: any) {
+      } catch (orErr) {
         if (isFAQRequest) return fallbackHandler();
         return res.status(502).json({ error: { message: "فشل التوليد: " + (err.message || orErr.message) } });
       }
@@ -1255,11 +1255,11 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   // OpenRouter default with APIFreeLLM fallback
   try {
     return await tryOpenRouter();
-  } catch (err: any) {
+  } catch (err) {
     console.warn('[OpenRouter failed, falling back to APIFreeLLM]:', err.message);
     try {
       return await tryAPIFree();
-    } catch (apiErr: any) {
+    } catch (apiErr) {
       if (isFAQRequest) return fallbackHandler();
       return res.status(503).json({ error: { message: "تعذر الاتصال بمركز الذكاء الاصطناعي. يرجى إعادة المحاولة." } });
     }
