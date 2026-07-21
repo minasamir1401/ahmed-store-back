@@ -45,7 +45,7 @@ const sharp = require('sharp');
 
 const optimizeImage = async (file, type) => {
   const extension = path.extname(file.originalname).replace('.', '') || 'jpg';
-  
+
   let detectedMime = file.mimetype;
   const hex = file.buffer.toString('hex', 0, 8);
   for (const [mime, prefixes] of allowedImageTypes.entries()) {
