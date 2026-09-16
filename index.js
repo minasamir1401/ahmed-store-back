@@ -263,28 +263,28 @@ prisma.$connect()
             role: 'admin'
           }
         });
-        console.log('Default admin user created successfully ✅');
+        console.log('Default admin user created successfully');
       }
 
-      // Seed default settings if they do not exist (forced updates via upsert)
+      // Seed default settings if they do not exist
       const defaultSettings = [
         { key: 'smtp_host', value: 'smtp.gmail.com' },
         { key: 'smtp_port', value: '587' },
         { key: 'smtp_secure', value: 'false' },
-        { key: 'smtp_user', value: 'the.vitaminshub@gmail.com' },
-        { key: 'smtp_pass', value: 'xrnd iepd yhlo bjst' },
-        { key: 'from_email', value: 'the.vitaminshub@gmail.com' },
+        { key: 'smtp_user', value: '' },
+        { key: 'smtp_pass', value: '' },
+        { key: 'from_email', value: '' },
         { key: 'from_name', value: 'The VitaHub' },
         { key: 'whatsapp_number', value: '01201450111' },
         { key: 'receiving_number', value: '01009596452' }
       ];
 
       for (const setting of defaultSettings) {
-        await prisma.setting.upsert({
-          where: { key: setting.key },
-          update: { value: setting.value },
-          create: { key: setting.key, value: setting.value }
-        });
+        const exists = await prisma.setting.findUnique({ where: { key: setting.key } });
+        if (!exists) {
+          await prisma.setting.create({ data: setting });
+          console.log(`Seeded default setting: ${setting.key} = ${setting.value}`);
+        }
       }
     } catch (err) {
       console.error('Error seeding default admin/settings:', err);
@@ -440,7 +440,78 @@ const excelUpload = multer({
   }
 });
 
-app.use('/api', require('./src/routes/upload.routes'));
+// ── Upload Endpoints ──────────────────────────────────────────
+app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
+    const altText = resolveImageAlt(req.body, req.file);
+    const uploadType = req.query.type || req.body.type;
+    const optimized = await optimizeImage(req.file, uploadType);
+    const uniqueSuffix = crypto.randomBytes(6).toString('hex');
+    const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
+    
+    // Save file to the uploads directory
+    const uploadPath = path.join(__dirname, 'uploads', fileName);
+    fs.writeFileSync(uploadPath, optimized.data);
+    
+    const imageUrl = `/uploads/${fileName}`;
+
+    res.json({
+      id: uniqueSuffix,
+      url: imageUrl,
+      thumbnailUrl: imageUrl,
+      altText,
+      width: optimized.width,
+      height: optimized.height,
+      size: optimized.size
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/upload-multiple', adminAuthenticate, upload.array('images', 10), async (req, res) => {
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+  try {
+    const urls = [];
+    for (const file of req.files) {
+      if (!isAllowedImageBuffer(file)) return res.status(400).json({ error: 'Invalid image content' });
+      const altText = resolveImageAlt(req.body, file);
+      const optimized = await optimizeImage(file);
+      const uniqueSuffix = crypto.randomBytes(6).toString('hex');
+      const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
+      
+      // Save file to the uploads directory
+      const uploadPath = path.join(__dirname, 'uploads', fileName);
+      fs.writeFileSync(uploadPath, optimized.data);
+      
+      urls.push(`/uploads/${fileName}`);
+    }
+    res.json({ urls });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/images/:id/meta', (req, res) => {
+  res.status(404).json({ error: 'Legacy ImageStore is deprecated. Please use /uploads/' });
+});
+
+// Reusable placeholder SVG for missing/broken images
+const PLACEHOLDER_SVG = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><rect width="400" height="400" fill="#f1f5f9"/><rect x="140" y="130" width="120" height="100" rx="8" fill="#cbd5e1"/><circle cx="170" cy="155" r="12" fill="#94a3b8"/><polygon points="140,230 185,175 215,205 240,185 260,230" fill="#94a3b8"/><text x="200" y="270" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#94a3b8">صورة غير متاحة</text></svg>`);
+
+app.get('/api/images/:id/thumb', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  return res.send(PLACEHOLDER_SVG);
+});
+
+app.get('/api/images/:id', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  return res.send(PLACEHOLDER_SVG);
+});
 
 // ── AI Endpoints ──────────────────────────────────────────────
 function generateMockFAQs(productTitle) {
@@ -539,72 +610,43 @@ function generateMockFAQs(productTitle) {
 }
 
 // ── OpenRouter Model Rotation ───────────────────────────
-// Rotating list of valid OpenRouter free models
+// Rotating list of models (prioritizing user's requested free models, then paid fallbacks).
 const OR_FREE_MODELS = [
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen-2.5-72b-instruct:free',
-  'google/gemini-2.0-flash-exp:free',
-  'deepseek/deepseek-r1:free',
-  'meta-llama/llama-3.1-8b-instruct:free'
+  'openai/gpt-oss-120b:free',
+  'openai/gpt-oss-20b:free',
+  'google/gemini-2.5-flash',
+  'meta-llama/llama-3.1-8b-instruct'
 ];
 let orModelIndex = 0; // Shared rotation index across all callers
 
 // Robust JSON parser for AI outputs
 function parseAIJSON(str) {
-  if (typeof str !== 'string' || !str.trim()) return {};
+  if (typeof str !== 'string') return {};
   let cleaned = str.trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) cleaned = match[0];
+  cleaned = cleaned.replace(/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
 
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  }
-
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
-  } else {
-    return {};
-  }
-
-  try {
-    return JSON.parse(cleaned);
-  } catch (e1) {}
-
-  cleaned = cleaned.replace(/,(\s*[\}\]])/g, '$1');
-  try {
-    return JSON.parse(cleaned);
-  } catch (e2) {}
-
-  let insideString = false;
-  let fixedStr = '';
+  let insideQuote = false;
+  let result = '';
   for (let i = 0; i < cleaned.length; i++) {
     const char = cleaned[i];
-    const prevChar = i > 0 ? cleaned[i - 1] : '';
-    const isEscaped = prevChar === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
+    const isEscaped = i > 0 && cleaned[i - 1] === '\\' && (i < 2 || cleaned[i - 2] !== '\\');
 
     if (char === '"' && !isEscaped) {
-      insideString = !insideString;
-      fixedStr += char;
-    } else if (insideString) {
-      if (char === '\n') fixedStr += '\\n';
-      else if (char === '\r') fixedStr += '\\r';
-      else if (char === '\t') fixedStr += '\\t';
-      else fixedStr += char;
+      insideQuote = !insideQuote;
+      result += char;
+    } else if (insideQuote) {
+      if (char === '\n') result += '\\n';
+      else if (char === '\r') result += '\\r';
+      else if (char === '\t') result += '\\t';
+      else result += char;
     } else {
-      fixedStr += char;
+      result += char;
     }
   }
 
-  try {
-    return JSON.parse(fixedStr);
-  } catch (e3) {
-    try {
-      const sanitized = fixedStr.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
-      return new Function(`return (${sanitized})`)();
-    } catch (e4) {
-      return {};
-    }
-  }
+  return JSON.parse(result);
 }
 
 // Reusable SEO generator with OpenRouter or APIFreeLLM
@@ -872,18 +914,6 @@ async function generateAndSaveProductSEO(productId, force = false, provider = 'o
       "answer_ar": "إجابة احترافية 3 بالعربية.",
       "question_en": "Question 3 in English?",
       "answer_en": "Professional answer 3 in English."
-    },
-    {
-      "question_ar": "سؤال شائع 4 بالعربية؟",
-      "answer_ar": "إجابة احترافية 4 بالعربية.",
-      "question_en": "Question 4 in English?",
-      "answer_en": "Professional answer 4 in English."
-    },
-    {
-      "question_ar": "سؤال شائع 5 بالعربية؟",
-      "answer_ar": "إجابة احترافية 5 بالعربية.",
-      "question_en": "Question 5 in English?",
-      "answer_en": "Professional answer 5 in English."
     }
   ]
 }`;
@@ -1157,48 +1187,70 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
   }
   */
 
-  // Function to try APIFreeLLM
-  const tryAPIFree = async () => {
-    const messages = req.body.messages || [];
-    const sysMsg = messages.find(m => m.role === 'system')?.content || '';
-    const userMsg = messages.find(m => m.role === 'user')?.content || '';
-    let prompt = '';
-    if (sysMsg) prompt += `${sysMsg}\n\n`;
-    prompt += userMsg;
+  // Support APIFreeLLM directly
+  if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
+    try {
+      const messages = req.body.messages || [];
+      const sysMsg = messages.find(m => m.role === 'system')?.content || '';
+      const userMsg = messages.find(m => m.role === 'user')?.content || '';
+      let prompt = '';
+      if (sysMsg) {
+        prompt += `${sysMsg}\n\n`;
+      }
+      prompt += userMsg;
 
-    const keysToTry = [];
-    const envKey = process.env.APIFREE_API_KEY || '';
-    if (envKey) keysToTry.push(envKey);
-    keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf');
+      const keysToTry = [];
+      const envKey = process.env.APIFREE_API_KEY || '';
+      if (envKey) keysToTry.push(envKey);
+      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
 
-    const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
-    return res.json({
-      choices: [{ message: { role: 'assistant', content: responseText } }]
-    });
-  };
+      const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
+      return res.json({
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: responseText
+            }
+          }
+        ]
+      });
+    } catch (err) {
+      console.error('[APIFreeLLM call failed]', err);
+      if (isFAQRequest) {
+        return fallbackHandler();
+      }
+      return res.status(502).json({ 
+        error: { 
+          message: "فشل الاتصال بـ APIFreeLLM: " + err.message,
+          details: err.message
+        } 
+      });
+    }
+  }
 
-  // Function to try OpenRouter
-  const tryOpenRouter = async () => {
+  try {
     const apiKey = process.env.OPENROUTER_API_KEY || '';
-    if (!apiKey) throw new Error('OPENROUTER_API_KEY missing');
-
+    if (!apiKey) return res.status(503).json({ error: 'AI service is not configured' });
     const payload = { ...req.body };
     delete payload.apiKey;
     delete payload.provider;
+
+    // Rotate through free models on rate-limit
+    const modelName = payload.model || OR_FREE_MODELS[orModelIndex];
+    payload.model = modelName;
     delete payload.models;
 
     let lastError = null;
-    const maxAttempts = OR_FREE_MODELS.length * 2;
+    let responseData = null;
+    let success = false;
+    let lastStatus = 503;
+    const maxAttempts = OR_FREE_MODELS.length + 3;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const currentModel = OR_FREE_MODELS[orModelIndex];
-      payload.model = currentModel;
-
-      // Strip response_format on retry or if provider doesn't support it
-      if (attempt > 1) {
-        delete payload.response_format;
-      }
-
+      // If user explicitly sent a model, honor it on first attempt only
+      payload.model = (attempt === 1 && modelName !== OR_FREE_MODELS[0]) ? modelName : currentModel;
       try {
         console.log(`[OpenRouter] Requesting model: ${payload.model} (Attempt ${attempt}/${maxAttempts})`);
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1210,59 +1262,64 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
           body: JSON.stringify(payload)
         });
 
+        lastStatus = response.status;
+
         if (response.status === 429) {
-          console.warn(`[OpenRouter] Model "${payload.model}" 429. Switching...`);
+          await response.text();
+          console.warn(`[OpenRouter] Model "${payload.model}" rate-limited. Switching...`);
+          orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
+        }
+
+        const contentType = response.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          const textError = await response.text();
+          console.warn(`[OpenRouter] Non-JSON from "${payload.model}". Switching...`);
           orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
           await new Promise(resolve => setTimeout(resolve, 3000));
           continue;
         }
 
-        const data = await response.json().catch(() => null);
-        if (!response.ok || !data || !data.choices?.[0]?.message?.content) {
-          const errMsg = data?.error?.message || `Status ${response.status}`;
-          console.warn(`[OpenRouter] Error from "${payload.model}": ${errMsg}. Switching...`);
+        const data = await response.json();
+        if (!response.ok) {
+          console.warn(`[OpenRouter] Error ${response.status} from "${payload.model}". Switching...`);
           orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 3000));
           continue;
         }
 
-        return res.json(data);
+        responseData = data;
+        success = true;
+        break;
       } catch (err) {
         console.warn(`[OpenRouter] Attempt ${attempt} failed:`, err.message);
         lastError = err;
         orModelIndex = (orModelIndex + 1) % OR_FREE_MODELS.length;
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
-    throw lastError || new Error('All OpenRouter models failed');
-  };
 
-  // Support APIFreeLLM directly with OpenRouter fallback
-  if (req.body.provider === 'apifree' || requestedModel === 'apifree') {
-    try {
-      return await tryAPIFree();
-    } catch (err) {
-      console.warn('[APIFreeLLM failed, falling back to OpenRouter]:', err.message);
-      try {
-        return await tryOpenRouter();
-      } catch (orErr) {
-        if (isFAQRequest) return fallbackHandler();
-        return res.status(502).json({ error: { message: "فشل التوليد: " + (err.message || orErr.message) } });
+    if (!success) {
+      console.error('[OpenRouter] All attempts failed. Last error:', lastError);
+      if (isFAQRequest) {
+        return fallbackHandler();
       }
+      return res.status(lastStatus).json({ 
+        error: { 
+          message: "فشلت محاولات الاتصال بالذكاء الاصطناعي على النموذج المحدد. يرجى المحاولة لاحقاً.",
+          details: lastError ? lastError.message : undefined
+        } 
+      });
     }
-  }
 
-  // OpenRouter default with APIFreeLLM fallback
-  try {
-    return await tryOpenRouter();
-  } catch (err) {
-    console.warn('[OpenRouter failed, falling back to APIFreeLLM]:', err.message);
-    try {
-      return await tryAPIFree();
-    } catch (apiErr) {
-      if (isFAQRequest) return fallbackHandler();
-      return res.status(503).json({ error: { message: "تعذر الاتصال بمركز الذكاء الاصطناعي. يرجى إعادة المحاولة." } });
+    res.json(responseData);
+  } catch (error) {
+    console.error('AI Proxy Error:', error);
+    if (isFAQRequest) {
+      return fallbackHandler();
     }
+    res.status(503).json({ error: { message: "تعذر الاتصال بخدمة الذكاء الاصطناعي. يرجى المحاولة لاحقاً." } });
   }
 });
 
@@ -1719,7 +1776,7 @@ app.get('/api/settings', async (req, res) => {
   try {
     const whatsapp_number = await getSetting(prisma, 'whatsapp_number', '01201450111');
     const receiving_number = await getSetting(prisma, 'receiving_number', '01009596452');
-    const shipping_rates = await getSetting(prisma, 'shipping_rates', '{}');
+    const shipping_rates = await getSetting(prisma, 'shipping_rates', '');
     const return_policy = await getSetting(prisma, 'return_policy', '');
     res.json({ whatsapp_number, receiving_number, shipping_rates, return_policy });
   } catch (error) {
@@ -1729,24 +1786,16 @@ app.get('/api/settings', async (req, res) => {
 
 app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
   try {
-    const keys = [
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
-      'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number',
-      'shipping_rates', 'return_policy'
-    ];
-    const settings = {};
-    for (const key of keys) {
-      let def = '';
-      if (key === 'smtp_host') def = 'smtp.gmail.com';
-      if (key === 'smtp_port') def = '587';
-      if (key === 'smtp_secure') def = 'false';
-      if (key === 'from_name') def = 'The VitaHub';
-      if (key === 'whatsapp_number') def = '01201450111';
-      if (key === 'receiving_number') def = '01009596452';
+    const allRows = await prisma.setting.findMany();
+    const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
-      settings[key] = await getSetting(prisma, key, def);
-    }
+    if (!settings.smtp_host) settings.smtp_host = 'smtp.gmail.com';
+    if (!settings.smtp_port) settings.smtp_port = '587';
+    if (!settings.smtp_secure) settings.smtp_secure = 'false';
+    if (!settings.from_name) settings.from_name = 'The VitaHub';
+    if (!settings.whatsapp_number) settings.whatsapp_number = '01201450111';
+    if (!settings.receiving_number) settings.receiving_number = '01009596452';
+
     res.json(settings);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1756,18 +1805,149 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
 app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
   const data = req.body;
   try {
-    const keys = [
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
-      'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number',
-      'shipping_rates', 'return_policy'
-    ];
-    for (const key of keys) {
-      if (data[key] !== undefined) {
-        await setSetting(prisma, key, String(data[key]));
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined && value !== null) {
+        await setSetting(prisma, key, String(value));
       }
     }
     res.json({ message: 'تم حفظ الإعدادات بنجاح' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Pixel & Analytics Endpoints ──────────────────
+app.post('/api/pixel-events', async (req, res) => {
+  try {
+    const { eventName, url, metadata, eventId, fbp, fbc } = req.body || {};
+    if (!eventName) {
+      return res.status(400).json({ error: 'eventName is required' });
+    }
+
+    const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || '').toString().split(',')[0].trim();
+    const userAgent = req.headers['user-agent'] || null;
+
+    let metaString = null;
+    if (metadata) {
+      metaString = typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+    }
+
+    const event = await prisma.pixelEvent.create({
+      data: {
+        eventName: String(eventName),
+        url: url ? String(url) : null,
+        metadata: metaString,
+        eventId: eventId ? String(eventId) : null,
+        fbp: fbp ? String(fbp) : null,
+        fbc: fbc ? String(fbc) : null,
+        customerIp: clientIp || null,
+        userAgent
+      }
+    });
+
+    res.status(201).json({ success: true, id: event.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/pixel-stats', adminAuthenticate, async (req, res) => {
+  try {
+    const totalEvents = await prisma.pixelEvent.count();
+
+    const counts = await prisma.pixelEvent.groupBy({
+      by: ['eventName'],
+      _count: { id: true }
+    });
+    const eventCounts = Object.fromEntries(counts.map(c => [c.eventName, c._count.id]));
+
+    const distinctIps = await prisma.pixelEvent.findMany({
+      distinct: ['customerIp'],
+      select: { customerIp: true },
+      where: { customerIp: { not: null } }
+    });
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentEvents = await prisma.pixelEvent.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      select: { eventName: true, createdAt: true },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const dayMap = new Map();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dayKey = d.toISOString().substring(0, 10);
+      dayMap.set(dayKey, { date: dayKey, total: 0, PageView: 0, ViewContent: 0, AddToCart: 0, Purchase: 0 });
+    }
+
+    for (const ev of recentEvents) {
+      const dayKey = ev.createdAt.toISOString().substring(0, 10);
+      if (dayMap.has(dayKey)) {
+        const item = dayMap.get(dayKey);
+        item.total++;
+        if (item[ev.eventName] !== undefined) {
+          item[ev.eventName]++;
+        }
+      }
+    }
+
+    res.json({
+      totalEvents,
+      uniqueVisitors: distinctIps.length,
+      eventCounts,
+      chartData: Array.from(dayMap.values())
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/pixel-events', adminAuthenticate, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const search = (req.query.search || '').trim();
+
+    const where = {};
+    if (search) {
+      where.OR = [
+        { eventName: { contains: search, mode: 'insensitive' } },
+        { url: { contains: search, mode: 'insensitive' } },
+        { customerIp: { contains: search, mode: 'insensitive' } },
+        { metadata: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+
+    const [events, total] = await Promise.all([
+      prisma.pixelEvent.findMany({
+        where,
+        take: limit,
+        skip: offset,
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.pixelEvent.count({ where })
+    ]);
+
+    const formattedEvents = events.map((ev) => {
+      let parsedMeta = null;
+      if (ev.metadata) {
+        try {
+          parsedMeta = JSON.parse(ev.metadata);
+        } catch (e) {
+          parsedMeta = ev.metadata;
+        }
+      }
+      return {
+        ...ev,
+        metadata: parsedMeta
+      };
+    });
+
+    res.json({ events: formattedEvents, total });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2328,109 +2508,33 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
   const filePath = req.file.path;
 
   try {
-    const { execFile } = require('child_process');
-    const pythonScript = path.join(__dirname, 'src', 'utils', 'parse_excel.py');
+    const { importProductsFromExcel } = require('./src/services/excelImportService');
+    const result = await importProductsFromExcel(filePath, prisma);
 
-    // Run the Python script to parse the Excel file
-    execFile('python', [pythonScript, filePath], async (error, stdout, stderr) => {
-      // Clean up the uploaded file
-      try {
+    try {
+      if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-      } catch (unlinkErr) {
-        console.error('Failed to delete uploaded temp file:', unlinkErr);
       }
+    } catch (unlinkErr) {
+      console.error('Failed to delete uploaded temp file:', unlinkErr);
+    }
 
-      if (error) {
-        console.error('Python execution error:', error, stderr);
-        return res.status(500).json({ error: `Failed to parse Excel file: ${stderr || error.message}` });
-      }
-
-      try {
-        const parsed = JSON.parse(stdout);
-        if (parsed.error) {
-          return res.status(400).json({ error: parsed.error });
-        }
-
-        // Upsert the default category "فيتامينات ومعادن"
-        const category = await prisma.category.upsert({
-          where: { name: "فيتامينات ومعادن" },
-          update: {},
-          create: { name: "فيتامينات ومعادن", nameEn: "Vitamins & Minerals" }
-        });
-
-        let importedCount = 0;
-        let updatedCount = 0;
-
-        // Process products sequentially
-        for (const item of parsed) {
-          const brandName = (item.brand || "Other").trim();
-          
-          // Find or create the brand
-          const brand = await prisma.brand.upsert({
-            where: { name: brandName },
-            update: {},
-            create: { name: brandName }
-          });
-
-          // Check if product with this title exists
-          const existingProduct = await prisma.product.findFirst({
-            where: { title: item.title }
-          });
-
-          if (existingProduct) {
-            await prisma.product.update({
-              where: { id: existingProduct.id },
-              data: {
-                price: item.price !== null ? item.price : existingProduct.price,
-                expiryDate: item.expiryDate || existingProduct.expiryDate,
-                categoryId: category.id,
-                brandId: brand.id
-              }
-            });
-            updatedCount++;
-            // Trigger background SEO if the existing product lacks description details
-            if (!existingProduct.desc || existingProduct.desc.trim().length < 100) {
-              addToSeoQueue(existingProduct.id);
-            }
-          } else {
-            const product = await prisma.product.create({
-              data: {
-                title: item.title,
-                price: item.price !== null ? item.price : 0,
-                expiryDate: item.expiryDate,
-                image: 'https://placehold.co/400x400?text=No+Image',
-                categoryId: category.id,
-                brandId: brand.id
-              }
-            });
-            // Optional: Notify Google Indexing API for new products (both old and new URLs)
-            notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
-            const slugParam = getProductUrlParam(product);
-            if (slugParam !== product.id) {
-              notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
-            }
-            importedCount++;
-            // Trigger background SEO for the newly created product
-            addToSeoQueue(product.id);
-          }
-        }
-
-        res.json({
-          success: true,
-          message: `تم استيراد ${importedCount} منتج جديد وتحديث ${updatedCount} منتج بنجاح.`,
-          importedCount,
-          updatedCount
-        });
-
-      } catch (parseErr) {
-        console.error('Failed to parse Python script output:', parseErr, stdout);
-        res.status(500).json({ error: 'Failed to process Excel data output.' });
-      }
+    res.json({
+      success: true,
+      message: result.message,
+      totalRows: result.totalRows,
+      importedCount: result.importedCount,
+      updatedCount: result.updatedCount
     });
-
   } catch (err) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (_) {}
+
     console.error('Import Excel error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message || 'Failed to process Excel file' });
   }
 });
 
@@ -2895,69 +2999,6 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     });
     res.status(201).json(order);
 
-    // ── Meta Conversions API (CAPI) Server-Side Purchase Dispatch ──
-    try {
-      const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
-      const userAgent = req.headers['user-agent'] || '';
-      const fbp = req.body.fbp || null;
-      const fbc = req.body.fbc || null;
-      const orderSourceUrl = req.headers.referer || 'https://the-vitahub.com/checkout';
-
-      // Record the Purchase event in PixelEvent table for analytics
-      await prisma.pixelEvent.create({
-        data: {
-          eventName: 'Purchase',
-          url: orderSourceUrl ? normalizeString(orderSourceUrl, 2048) : null,
-          customerIp: typeof customerIp === 'string' ? normalizeString(customerIp, 100) : null,
-          userAgent: typeof userAgent === 'string' ? normalizeString(userAgent, 500) : null,
-          metadata: JSON.stringify({
-            orderNumber: order.orderNumber,
-            total: order.total,
-            currency: 'EGP',
-            items: order.items,
-            customerName: order.customerName,
-            customerPhone: order.customerPhone,
-            customerEmail: order.customerEmail,
-            governorate: order.governorate,
-            eventId: order.orderNumber,
-            fbp,
-            fbc
-          })
-        }
-      });
-
-      // Send Purchase event directly to Meta Conversions API (CAPI) using orderNumber as deduplication event_id
-      await sendConversionsApiEvent({
-        eventName: 'Purchase',
-        eventId: order.orderNumber,
-        eventSourceUrl: orderSourceUrl,
-        customerIp,
-        userAgent,
-        fbp,
-        fbc,
-        customData: {
-          currency: 'EGP',
-          value: Number(order.total) || 0,
-          order_id: order.orderNumber,
-          contents: (order.items || []).map(item => ({
-            id: String(item.productId || item.id || ''),
-            quantity: Number(item.quantity) || 1,
-            item_price: Number(item.price) || 0
-          })),
-          content_type: 'product',
-          num_items: (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0)
-        },
-        userData: {
-          name: order.customerName,
-          phone: order.customerPhone,
-          email: order.customerEmail,
-          city: order.governorate
-        }
-      });
-    } catch (capiErr) {
-      console.error('Error dispatching server-side CAPI Purchase event:', capiErr);
-    }
-
     // Send order confirmation message via WhatsApp asynchronously
     const itemsListText = orderLanguage === 'en'
       ? (order.items && order.items.length > 0 
@@ -3137,74 +3178,15 @@ app.post('/api/orders/:id/ship', adminAuthenticate, async (req, res) => {
 });
 
 // ── Backup & Restore Endpoints ────────────────────────────────
-const AdmZip = require('adm-zip');
+const { generateFullStoreBackup, restoreFullStoreBackup } = require('./src/services/backupService');
 
 app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
   try {
-    const zip = new AdmZip();
-
-    // Check which tables are available and fetch their data
-    const tables = [
-      'user',
-      'category',
-      'brand',
-      'product',
-      'offer',
-      'blog',
-      'hero',
-      'order',
-      'orderItem',
-      'imageStore',
-      'medicalTip',
-      'setting',
-      'indexingLog'
-    ];
-
-    const dbData = {};
-    for (const table of tables) {
-      try {
-        dbData[table] = await prisma[table].findMany();
-      } catch (err) {
-        console.warn(`Table "${table}" is not available. Skipping backup for this table. Error:`, err.message);
-        dbData[table] = [];
-      }
-    }
-
-    // Save imageStore binary files separately to prevent JSON size issues
-    if (dbData.imageStore && dbData.imageStore.length > 0) {
-      for (const row of dbData.imageStore) {
-        if (row.data) {
-          const dataBuffer = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data.data || row.data);
-          zip.addFile(`imageStore/${row.id}_data.bin`, dataBuffer);
-          delete row.data;
-        }
-        if (row.thumbnailData) {
-          const thumbBuffer = Buffer.isBuffer(row.thumbnailData) ? row.thumbnailData : Buffer.from(row.thumbnailData.data || row.thumbnailData);
-          zip.addFile(`imageStore/${row.id}_thumb.bin`, thumbBuffer);
-          delete row.thumbnailData;
-        }
-      }
-    }
-
-    // Add database.json to zip
-    zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
-
-    // Add uploads directory to zip
     const uploadsDir = path.join(__dirname, 'uploads');
-    if (fs.existsSync(uploadsDir)) {
-      const files = fs.readdirSync(uploadsDir);
-      for (const file of files) {
-        const filePath = path.join(uploadsDir, file);
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
-          zip.addLocalFile(filePath, 'uploads');
-        }
-      }
-    }
-
-    const zipBuffer = zip.toBuffer();
+    const zipBuffer = await generateFullStoreBackup(prisma, uploadsDir);
+    const dateStr = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename=mithaly-backup.zip');
+    res.setHeader('Content-Disposition', `attachment; filename=mithaly-backup-${dateStr}.zip`);
     res.send(zipBuffer);
   } catch (error) {
     console.error('Backup error:', error);
@@ -3215,116 +3197,12 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
 app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No backup file uploaded' });
   try {
-    const zip = new AdmZip(req.file.buffer);
-    const databaseEntry = zip.getEntry('database.json');
-    if (!databaseEntry) {
-      return res.status(400).json({ error: 'Invalid backup file: database.json is missing' });
-    }
-
-    const dbData = JSON.parse(zip.readAsText(databaseEntry));
-
-    // Extract uploads
     const uploadsDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
-
-    const zipEntries = zip.getEntries();
-    for (const entry of zipEntries) {
-      if (entry.entryName.startsWith('uploads/') && !entry.isDirectory) {
-        const fileName = entry.name;
-        const targetPath = path.join(uploadsDir, fileName);
-        fs.writeFileSync(targetPath, entry.getData());
-      }
-    }
-
-    // Check which tables are available in the database to avoid transaction crashes
-    const tables = [
-      'user',
-      'category',
-      'brand',
-      'product',
-      'offer',
-      'blog',
-      'hero',
-      'order',
-      'orderItem',
-      'imageStore',
-      'medicalTip',
-      'setting',
-      'indexingLog'
-    ];
-
-    const availableTables = {};
-    for (const table of tables) {
-      try {
-        await prisma[table].findMany({ take: 1 });
-        availableTables[table] = true;
-      } catch (err) {
-        console.warn(`Table "${table}" is not available in the database. It will be skipped during restore.`);
-        availableTables[table] = false;
-      }
-    }
-
-    // Restore Database records inside a Transaction
-    await prisma.$transaction(async (tx) => {
-      const upsertData = async (model, dataArray, idField = 'id') => {
-        if (!dataArray || dataArray.length === 0) return;
-        for (const item of dataArray) {
-          const whereClause = {};
-          whereClause[idField] = item[idField];
-          try {
-            await model.upsert({
-              where: whereClause,
-              update: item,
-              create: item
-            });
-          } catch (e) {
-            console.error(`Failed to upsert for ${item[idField]}:`, e.message);
-          }
-        }
-      };
-
-      // Upsert records in dependency order (if available)
-      if (availableTables.user) await upsertData(tx.user, dbData.user);
-      if (availableTables.category) await upsertData(tx.category, dbData.category);
-      if (availableTables.brand) await upsertData(tx.brand, dbData.brand);
-      if (availableTables.product) await upsertData(tx.product, dbData.product);
-      if (availableTables.order) await upsertData(tx.order, dbData.order);
-      if (availableTables.orderItem) await upsertData(tx.orderItem, dbData.orderItem);
-      if (availableTables.offer) await upsertData(tx.offer, dbData.offer);
-      if (availableTables.blog) await upsertData(tx.blog, dbData.blog);
-      if (availableTables.hero) await upsertData(tx.hero, dbData.hero);
-      if (availableTables.medicalTip) await upsertData(tx.medicalTip, dbData.medicalTip);
-      if (availableTables.setting) await upsertData(tx.setting, dbData.setting, 'key');
-      if (availableTables.indexingLog) await upsertData(tx.indexingLog, dbData.indexingLog);
-
-      if (availableTables.imageStore && dbData.imageStore && dbData.imageStore.length > 0) {
-        // Resolve binaries from ZIP first
-        for (const row of dbData.imageStore) {
-          const dataEntry = zip.getEntry(`imageStore/${row.id}_data.bin`);
-          if (dataEntry) {
-            row.data = dataEntry.getData();
-          }
-          const thumbEntry = zip.getEntry(`imageStore/${row.id}_thumb.bin`);
-          if (thumbEntry) {
-            row.thumbnailData = thumbEntry.getData();
-          }
-        }
-
-        const imageStoresToInsert = dbData.imageStore.map(item => ({
-          ...item,
-          data: item.data ? (Buffer.isBuffer(item.data) ? item.data : Buffer.from(item.data.data || item.data)) : undefined,
-          thumbnailData: item.thumbnailData ? (Buffer.isBuffer(item.thumbnailData) ? item.thumbnailData : Buffer.from(item.thumbnailData.data || item.thumbnailData)) : undefined
-        }));
-        await upsertData(tx.imageStore, imageStoresToInsert);
-      }
-    }, {
-      maxWait: 10000,
-      timeout: 120000 // Give it 2 minutes since upserting takes longer
+    const result = await restoreFullStoreBackup(prisma, req.file.buffer, uploadsDir, req.user);
+    res.json({
+      message: 'تم استعادة النسخة الاحتياطية بنجاح مع الحفاظ على الروابط والـ SEO',
+      ...result
     });
-
-    res.json({ message: 'Backup restored successfully' });
   } catch (error) {
     console.error('Restore error:', error);
     res.status(500).json({ error: 'Failed to restore backup: ' + error.message });
@@ -3757,281 +3635,6 @@ async function runAutoCleanup() {
     console.error('[Auto-Cleanup] Error during background database cleanup:', error);
   }
 }
-
-// ── Meta Conversions API (CAPI) Helper ───────────────────────────
-const sendConversionsApiEvent = async ({
-  eventName,
-  eventId,
-  eventSourceUrl = 'https://the-vitahub.com/',
-  customerIp = '',
-  userAgent = '',
-  fbp = null,
-  fbc = null,
-  customData = {},
-  userData = {}
-}) => {
-  try {
-    const pixelId = process.env.META_PIXEL_ID || '2785073648526058';
-    const accessToken = process.env.META_ACCESS_TOKEN || process.env.META_CAPI_TOKEN || process.env.META_PIXEL_ACCESS_TOKEN || '';
-    if (!pixelId || !accessToken) {
-      return { success: false, reason: 'META_ACCESS_TOKEN or META_PIXEL_ID not configured on server' };
-    }
-
-    const hashSha256 = (str) => {
-      if (!str || typeof str !== 'string') return null;
-      const clean = str.trim().toLowerCase();
-      if (!clean) return null;
-      return crypto.createHash('sha256').update(clean).digest('hex');
-    };
-
-    const hashPhoneSha256 = (phone) => {
-      if (!phone || typeof phone !== 'string') return null;
-      let digits = phone.replace(/\D/g, '');
-      if (!digits) return null;
-      if (digits.startsWith('01') && digits.length === 11) {
-        digits = '20' + digits.substring(1);
-      } else if (digits.startsWith('1') && digits.length === 10) {
-        digits = '20' + digits;
-      } else if (digits.startsWith('0020')) {
-        digits = digits.substring(2);
-      }
-      return crypto.createHash('sha256').update(digits).digest('hex');
-    };
-
-    const user_data = {};
-
-    const emHash = hashSha256(userData.email || userData.customerEmail);
-    if (emHash) user_data.em = [emHash];
-
-    const phHash = hashPhoneSha256(userData.phone || userData.customerPhone);
-    if (phHash) user_data.ph = [phHash];
-
-    const fullName = (userData.name || userData.customerName || '').trim();
-    if (fullName) {
-      const parts = fullName.split(/\s+/);
-      const fnHash = hashSha256(parts[0]);
-      if (fnHash) user_data.fn = [fnHash];
-      if (parts.length > 1) {
-        const lnHash = hashSha256(parts.slice(1).join(' '));
-        if (lnHash) user_data.ln = [lnHash];
-      }
-    }
-
-    const ctHash = hashSha256(userData.city || userData.governorate);
-    if (ctHash) user_data.ct = [ctHash];
-
-    user_data.co = [crypto.createHash('sha256').update('eg').digest('hex')];
-
-    if (customerIp && typeof customerIp === 'string') {
-      const cleanIp = customerIp.split(',')[0].trim();
-      if (cleanIp && cleanIp !== '::1' && cleanIp !== '127.0.0.1') {
-        user_data.client_ip_address = cleanIp;
-      }
-    }
-    if (userAgent && typeof userAgent === 'string') {
-      user_data.client_user_agent = userAgent;
-    }
-    if (fbp && typeof fbp === 'string') {
-      user_data.fbp = fbp;
-    }
-    if (fbc && typeof fbc === 'string') {
-      user_data.fbc = fbc;
-    }
-
-    const payload = {
-      data: [
-        {
-          event_name: eventName,
-          event_time: Math.floor(Date.now() / 1000),
-          action_source: 'website',
-          event_source_url: eventSourceUrl || 'https://the-vitahub.com/',
-          event_id: eventId ? String(eventId) : undefined,
-          user_data,
-          custom_data: customData || {}
-        }
-      ]
-    };
-
-    const response = await fetch(`https://graph.facebook.com/v19.0/${pixelId}/events?access_token=${accessToken}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const result = await response.json();
-    if (!response.ok) {
-      console.error(`[Meta CAPI Error] Event "${eventName}" (${eventId}):`, result);
-      return { success: false, error: result };
-    }
-    console.log(`[Meta CAPI Success] Event "${eventName}" (${eventId}) dispatched. Events received: ${result.events_received}`);
-    return { success: true, result };
-  } catch (error) {
-    console.error(`[Meta CAPI Exception] Event "${eventName}":`, error.message);
-    return { success: false, error: error.message };
-  }
-};
-
-// ── Pixel Tracking & Analytics Routes ───────────────────────────
-app.post('/api/pixel-events', optionalAuthenticate, asyncHandler(async (req, res) => {
-  const { eventName, url, metadata, eventId, fbp, fbc } = req.body;
-  if (!eventName) {
-    return res.status(400).json({ error: 'Event name is required' });
-  }
-
-  const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
-  const userAgent = req.headers['user-agent'] || '';
-
-  const metaObj = metadata && typeof metadata === 'object' ? metadata : (metadata ? { rawMetadata: metadata } : {});
-  const storedMetadata = JSON.stringify({
-    ...metaObj,
-    ...(eventId ? { eventId } : {}),
-    ...(fbp ? { fbp } : {}),
-    ...(fbc ? { fbc } : {})
-  });
-
-  const event = await prisma.pixelEvent.create({
-    data: {
-      eventName: normalizeString(eventName, 100),
-      url: url ? normalizeString(url, 2048) : null,
-      customerIp: typeof customerIp === 'string' ? normalizeString(customerIp, 100) : null,
-      userAgent: typeof userAgent === 'string' ? normalizeString(userAgent, 500) : null,
-      metadata: storedMetadata
-    }
-  });
-
-  // For non-Purchase events, dispatch via server-to-server CAPI immediately.
-  // Purchase is already handled inside POST /api/orders once order creation succeeds.
-  if (eventName !== 'Purchase') {
-    let customData = {};
-    if (metadata && typeof metadata === 'object') {
-      if (metadata.value || metadata.price) {
-        customData.value = Number(metadata.value || metadata.price) || 0;
-        customData.currency = 'EGP';
-      }
-      if (metadata.title || metadata.content_name) {
-        customData.content_name = metadata.title || metadata.content_name;
-      }
-      if (metadata.id || (metadata.content_ids && Array.isArray(metadata.content_ids))) {
-        customData.content_ids = metadata.content_ids || [metadata.id];
-        customData.content_type = 'product';
-      }
-      if (metadata.search_string || metadata.query) {
-        customData.search_string = metadata.search_string || metadata.query;
-      }
-      if (metadata.cart && Array.isArray(metadata.cart)) {
-        customData.contents = metadata.cart.map(i => ({
-          id: String(i.id || ''),
-          quantity: Number(i.quantity) || 1,
-          item_price: Number(i.price) || 0
-        }));
-        customData.num_items = metadata.cart.reduce((sum, i) => sum + (Number(i.quantity) || 1), 0);
-      }
-    }
-
-    sendConversionsApiEvent({
-      eventName,
-      eventId: eventId || event.id,
-      eventSourceUrl: url || 'https://the-vitahub.com/',
-      customerIp,
-      userAgent,
-      fbp,
-      fbc,
-      customData,
-      userData: req.user ? {
-        name: req.user.name,
-        email: req.user.email,
-        phone: req.user.phone,
-        city: req.user.governorate
-      } : {}
-    }).catch(err => console.error(`Error sending CAPI ${eventName} event:`, err));
-  }
-
-  res.status(201).json({ success: true, eventId: event.id });
-}));
-
-app.get('/api/admin/pixel-events', adminAuthenticate, asyncHandler(async (req, res) => {
-  const limit = parsePositiveInt(req.query.limit, 100, 1000);
-  const offset = parsePositiveInt(req.query.offset, 0, 100000);
-  const search = req.query.search || '';
-
-  const where = {};
-  if (search) {
-    where.OR = [
-      { eventName: { contains: search, mode: 'insensitive' } },
-      { url: { contains: search, mode: 'insensitive' } },
-      { customerIp: { contains: search, mode: 'insensitive' } },
-      { metadata: { contains: search, mode: 'insensitive' } }
-    ];
-  }
-
-  const [events, total] = await Promise.all([
-    prisma.pixelEvent.findMany({
-      where,
-      take: limit,
-      skip: offset,
-      orderBy: { createdAt: 'desc' }
-    }),
-    prisma.pixelEvent.count({ where })
-  ]);
-
-  res.json({ events, total });
-}));
-
-app.get('/api/admin/pixel-stats', adminAuthenticate, asyncHandler(async (req, res) => {
-  try {
-    const aggregations = await prisma.pixelEvent.groupBy({
-      by: ['eventName'],
-      _count: {
-        _all: true
-      }
-    });
-
-    const uniqueIps = await prisma.pixelEvent.findMany({
-      select: { customerIp: true },
-      distinct: ['customerIp'],
-    });
-
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const recentEvents = await prisma.pixelEvent.findMany({
-      where: {
-        createdAt: {
-          gte: thirtyDaysAgo
-        }
-      },
-      select: {
-        eventName: true,
-        createdAt: true
-      }
-    });
-
-    const dailyStats = {};
-    recentEvents.forEach(e => {
-      const day = e.createdAt.toISOString().slice(0, 10);
-      if (!dailyStats[day]) {
-        dailyStats[day] = { date: day, PageView: 0, ViewContent: 0, AddToCart: 0, InitiateCheckout: 0, Purchase: 0, total: 0 };
-      }
-      const evt = e.eventName;
-      if (dailyStats[day][evt] !== undefined) {
-        dailyStats[day][evt]++;
-      }
-      dailyStats[day].total++;
-    });
-
-    const chartData = Object.values(dailyStats).sort((a, b) => a.date.localeCompare(b.date));
-
-    res.json({
-      eventCounts: aggregations.map(a => ({ eventName: a.eventName, count: a._count._all })),
-      uniqueVisitors: uniqueIps.filter(ip => ip.customerIp).length,
-      chartData
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-}));
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

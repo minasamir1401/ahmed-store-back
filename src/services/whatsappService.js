@@ -1,14 +1,20 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, BufferJSON } = require('@whiskeysockets/baileys');
+const { PrismaClient } = require('@prisma/client');
+const qrcodeTerminal = require('qrcode-terminal');
 const pino = require('pino');
-const fs = require('fs');
 const path = require('path');
-const qrcode = require('qrcode-terminal');
+const fs = require('fs');
 
-const authPath = process.env.WHATSAPP_AUTH_PATH || path.join(__dirname, '..', '..', '.baileys_auth');
+const prisma = new PrismaClient();
+const authFolder = process.env.WHATSAPP_AUTH_PATH || path.join(__dirname, '..', '..', '.baileys_auth');
 
 let sock = null;
 let qrCode = null;
-let status = 'disconnected'; // 'disconnected', 'initializing', 'qr', 'connected'
+let status = 'disconnected'; // 'disconnected' | 'initializing' | 'qr' | 'connected'
+let authHandler = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let isInitializing = false;
 
 function getStatus() {
   return { status, qr: qrCode };
@@ -16,158 +22,307 @@ function getStatus() {
 
 function convertArabicNums(str) {
   if (!str) return '';
-  return str.replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  return str.replace(/[٠-٩]/g, (digit) => '٠١٢٣٤٥٦٧٨٩'.indexOf(digit));
+}
+
+function normalizePhoneNumber(phone) {
+  if (!phone) return null;
+  let singlePhone = String(phone);
+  const parts = singlePhone.split(/[\s,/\-;_]+/);
+  if (parts.length > 0) {
+    const validPart = parts.find((p) => p.replace(/\D/g, '').length >= 10);
+    if (validPart) {
+      singlePhone = validPart;
+    }
+  }
+
+  let cleaned = convertArabicNums(singlePhone).replace(/\D/g, '');
+  if (cleaned.startsWith('00')) {
+    cleaned = cleaned.substring(2);
+  }
+
+  if (cleaned.startsWith('01') && cleaned.length === 11) {
+    cleaned = '20' + cleaned.substring(1);
+  } else if (cleaned.startsWith('20') && cleaned.length === 12) {
+    // Valid Egyptian international format
+  } else if (cleaned.length === 10 && cleaned.startsWith('1')) {
+    cleaned = '20' + cleaned;
+  }
+
+  return cleaned || null;
+}
+
+async function getPrismaBaileysAuth(authPath) {
+  if (!fs.existsSync(authPath)) {
+    fs.mkdirSync(authPath, { recursive: true });
+  }
+
+  const credsFile = path.join(authPath, 'creds.json');
+  if (!fs.existsSync(credsFile)) {
+    try {
+      const rows = await prisma.whatsAppSession.findMany();
+      if (rows.length > 0) {
+        console.log(`[WhatsApp] Restoring ${rows.length} session entries from PostgreSQL...`);
+        for (const row of rows) {
+          const filePath = path.join(authPath, row.key);
+          fs.writeFileSync(filePath, row.value, 'utf-8');
+        }
+      }
+    } catch (err) {
+      console.error('[WhatsApp] Error restoring session from database:', err.message);
+    }
+  }
+
+  const { state, saveCreds: baseSaveCreds } = await useMultiFileAuthState(authPath);
+
+  const saveCreds = async () => {
+    try {
+      await baseSaveCreds();
+      if (fs.existsSync(credsFile)) {
+        const raw = fs.readFileSync(credsFile, 'utf-8');
+        await prisma.whatsAppSession.upsert({
+          where: { key: 'creds.json' },
+          create: { key: 'creds.json', value: raw },
+          update: { value: raw }
+        });
+      }
+    } catch (err) {
+      console.error('[WhatsApp] Failed to backup creds to DB:', err.message);
+    }
+  };
+
+  const baseSet = state.keys.set;
+  state.keys.set = async (data) => {
+    await baseSet(data);
+    try {
+      const upserts = [];
+      const deletes = [];
+      for (const category in data) {
+        for (const id in data[category]) {
+          const value = data[category][id];
+          const fileName = `${category}-${id}.json`.replace(/\//g, '__').replace(/:/g, '-');
+          if (value) {
+            const raw = JSON.stringify(value, BufferJSON.replacer);
+            upserts.push(
+              prisma.whatsAppSession.upsert({
+                where: { key: fileName },
+                create: { key: fileName, value: raw },
+                update: { value: raw }
+              })
+            );
+          } else {
+            deletes.push(fileName);
+          }
+        }
+      }
+      if (upserts.length > 0) {
+        await Promise.all(upserts);
+      }
+      if (deletes.length > 0) {
+        await prisma.whatsAppSession.deleteMany({
+          where: { key: { in: deletes } }
+        });
+      }
+    } catch (dbErr) {
+      console.error('[WhatsApp] Session keys DB sync error:', dbErr.message);
+    }
+  };
+
+  return {
+    state,
+    saveCreds,
+    clearAuth: async () => {
+      try {
+        if (fs.existsSync(authPath)) {
+          fs.rmSync(authPath, { recursive: true, force: true });
+        }
+      } catch (e) {
+        console.error('[WhatsApp] Failed to clear local auth folder:', e.message);
+      }
+      try {
+        await prisma.whatsAppSession.deleteMany();
+      } catch (e) {
+        console.error('[WhatsApp] Failed to clear database session table:', e.message);
+      }
+    }
+  };
+}
+
+function scheduleReconnect(delayMs = 5000) {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    initWhatsApp().catch((err) => {
+      console.error('[WhatsApp] Reconnect failed:', err.message);
+    });
+  }, delayMs);
 }
 
 async function initWhatsApp() {
+  if (isInitializing) {
+    return;
+  }
+  isInitializing = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   if (sock) {
     try {
-      sock.end();
-    } catch (e) {
-      console.error('Error ending existing socket:', e);
-    }
+      sock.ev.removeAllListeners();
+      sock.end(undefined);
+    } catch (e) {}
+    sock = null;
   }
 
   status = 'initializing';
   qrCode = null;
-  console.log('Initializing WhatsApp Baileys Client...');
+  console.log('[WhatsApp] Initializing Baileys client...');
 
   try {
-    const parentDir = path.dirname(authPath);
-    if (!fs.existsSync(parentDir)) {
-      fs.mkdirSync(parentDir, { recursive: true });
-    }
-
-    // Fetch the latest WhatsApp version to avoid 405 Method Not Allowed error
-    let version = [2, 3000, 1017531287];
-    try {
-      const { version: latestVersion } = await fetchLatestBaileysVersion();
-      version = latestVersion;
-      console.log(`Successfully fetched latest WhatsApp version: ${version.join('.')}`);
-    } catch (err) {
-      console.warn('Failed to fetch latest WhatsApp version, using default fallback:', err);
-    }
-
-    const { state, saveCreds } = await useMultiFileAuthState(authPath);
+    authHandler = await getPrismaBaileysAuth(authFolder);
 
     sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
+      auth: authHandler.state,
       logger: pino({ level: 'silent' }),
+      browser: Browsers.macOS('Desktop'),
+      syncFullHistory: false,
+      defaultQueryTimeoutMs: 60000,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', authHandler.saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('=== WhatsApp QR Code Received ===');
-        qrcode.generate(qr, { small: true });
         qrCode = qr;
         status = 'qr';
+        console.log('[WhatsApp] QR code received. Displaying in terminal and awaiting scan...');
+        try {
+          qrcodeTerminal.generate(qr, { small: true });
+        } catch (e) {}
+      }
+
+      if (connection === 'open') {
+        status = 'connected';
+        qrCode = null;
+        reconnectAttempts = 0;
+        console.log('[WhatsApp] Connection opened successfully. Client is ready.');
       }
 
       if (connection === 'close') {
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-        console.log('WhatsApp connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
-        status = 'disconnected';
-        qrCode = null;
-        if (shouldReconnect) {
-          setTimeout(() => initWhatsApp(), 5000);
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+        console.log(`[WhatsApp] Connection closed. StatusCode: ${statusCode || 'none'}, LoggedOut: ${Boolean(isLoggedOut)}`);
+
+        if (isLoggedOut) {
+          status = 'disconnected';
+          qrCode = null;
+          await authHandler.clearAuth();
+          console.log('[WhatsApp] Device unlinked or logged out. Session deleted. Reinitializing fresh state...');
+          scheduleReconnect(1500);
         } else {
-          console.log('Logged out of WhatsApp. Clear session and restart to generate new QR.');
+          status = 'disconnected';
+          const delay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
+          reconnectAttempts++;
+          console.log(`[WhatsApp] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})...`);
+          scheduleReconnect(delay);
         }
-      } else if (connection === 'open') {
-        console.log('WhatsApp Client is Ready and Connected! 🎉');
-        status = 'connected';
-        qrCode = null;
       }
     });
-
-  } catch (error) {
-    console.error('Error starting WhatsApp client:', error);
+  } catch (err) {
+    console.error('[WhatsApp] Failed to initialize client:', err.message);
     status = 'disconnected';
+    scheduleReconnect(10000);
+  } finally {
+    isInitializing = false;
   }
 }
 
 async function logoutWhatsApp() {
-  console.log('Logging out of WhatsApp...');
-  try {
-    if (sock) {
-      await sock.logout();
-    }
-  } catch (err) {
-    console.error('Error during WhatsApp logout:', err);
+  console.log('[WhatsApp] Logging out...');
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
 
-  // Clear auth session folder
-  if (fs.existsSync(authPath)) {
-    try {
-      fs.rmSync(authPath, { recursive: true, force: true });
-      console.log('WhatsApp Session files cleared.');
-    } catch (e) {
-      console.error('Error deleting auth folder:', e);
+  try {
+    if (sock) {
+      try {
+        await sock.logout();
+      } catch (e) {
+        console.warn('[WhatsApp] Direct socket logout skipped, terminating connection:', e.message);
+      }
+      try {
+        sock.ev.removeAllListeners();
+        sock.end(undefined);
+      } catch (e) {}
+      sock = null;
     }
+  } catch (err) {
+    console.error('[WhatsApp] Error during logout:', err.message);
+  }
+
+  if (authHandler) {
+    await authHandler.clearAuth();
+  } else {
+    try {
+      if (fs.existsSync(authFolder)) {
+        fs.rmSync(authFolder, { recursive: true, force: true });
+      }
+    } catch (e) {}
+    try {
+      await prisma.whatsAppSession.deleteMany();
+    } catch (e) {}
   }
 
   status = 'disconnected';
   qrCode = null;
-  sock = null;
+  reconnectAttempts = 0;
 
-  // Restart client
-  initWhatsApp();
+  setTimeout(() => {
+    initWhatsApp().catch((err) => {
+      console.error('[WhatsApp] Re-init after logout error:', err.message);
+    });
+  }, 1000);
+
+  return { success: true };
 }
 
 async function sendWhatsAppMessage(phone, message) {
   if (!sock || status !== 'connected') {
-    console.warn(`WhatsApp not connected (Status: ${status}). Cannot send message to ${phone}`);
+    console.warn(`[WhatsApp] Not connected (Status: ${status}). Message to ${phone} not sent.`);
     return false;
   }
+
+  const normalized = normalizePhoneNumber(phone);
+  if (!normalized) {
+    console.warn(`[WhatsApp] Invalid phone number provided: "${phone}"`);
+    return false;
+  }
+
   try {
-    // Clean and format phone number
-    let singlePhone = phone;
-    if (typeof phone === 'string') {
-      const parts = phone.split(/[\s,/\-;_]+/);
-      if (parts.length > 0) {
-        const validPart = parts.find(p => p.replace(/\D/g, '').length >= 10);
-        if (validPart) {
-          singlePhone = validPart;
-        }
+    let targetJid = `${normalized}@s.whatsapp.net`;
+    try {
+      const lookup = await sock.onWhatsApp(normalized);
+      if (lookup && lookup.length > 0 && lookup[0]?.exists) {
+        targetJid = lookup[0].jid;
       }
+    } catch (lookupErr) {
+      console.warn(`[WhatsApp] JID lookup failed for ${normalized}, using fallback JID`);
     }
 
-    let cleaned = convertArabicNums(singlePhone);
-    let formattedPhone = cleaned.replace(/\D/g, '');
-    
-    if (formattedPhone.startsWith('00')) {
-      formattedPhone = formattedPhone.substring(2);
-    }
-
-    if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
-      formattedPhone = '20' + formattedPhone.substring(1);
-    } else if (formattedPhone.startsWith('20') && formattedPhone.length === 12) {
-      // Correct
-    } else if (formattedPhone.length === 10 && formattedPhone.startsWith('1')) {
-      formattedPhone = '20' + formattedPhone;
-    }
-
-    const jid = `${formattedPhone}@s.whatsapp.net`;
-    console.log(`Sending WhatsApp message to jid: ${jid}`);
-    
-    // Check if number is on WhatsApp
-    const [result] = await sock.onWhatsApp(jid);
-    if (!result || !result.exists) {
-      console.warn(`Phone number ${phone} (${formattedPhone}) is not registered on WhatsApp.`);
-      return false;
-    }
-
-    await sock.sendMessage(jid, { text: message });
-    console.log(`WhatsApp message sent successfully to ${jid}`);
+    console.log(`[WhatsApp] Sending message to ${targetJid}...`);
+    await sock.sendMessage(targetJid, { text: message });
+    console.log(`[WhatsApp] Message successfully sent to ${targetJid}`);
     return true;
   } catch (error) {
-    console.error(`Error sending WhatsApp message to ${phone}:`, error);
+    console.error(`[WhatsApp] Error sending message to ${phone}:`, error.message);
     return false;
   }
 }

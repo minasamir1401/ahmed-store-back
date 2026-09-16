@@ -8,4 +8,4 @@ dev.db-journal
 uploads/
 *.log
 google-indexing-key.json  
- 
+.baileys_auth/
