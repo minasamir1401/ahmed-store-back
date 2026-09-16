@@ -263,7 +263,7 @@ prisma.$connect()
             role: 'admin'
           }
         });
-        console.log('Default admin user created successfully ✅');
+        console.log('Default admin user created successfully');
       }
 
       // Seed default settings if they do not exist
@@ -1776,7 +1776,9 @@ app.get('/api/settings', async (req, res) => {
   try {
     const whatsapp_number = await getSetting(prisma, 'whatsapp_number', '01201450111');
     const receiving_number = await getSetting(prisma, 'receiving_number', '01009596452');
-    res.json({ whatsapp_number, receiving_number });
+    const shipping_rates = await getSetting(prisma, 'shipping_rates', '');
+    const return_policy = await getSetting(prisma, 'return_policy', '');
+    res.json({ whatsapp_number, receiving_number, shipping_rates, return_policy });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1784,23 +1786,16 @@ app.get('/api/settings', async (req, res) => {
 
 app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
   try {
-    const keys = [
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
-      'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number'
-    ];
-    const settings = {};
-    for (const key of keys) {
-      let def = '';
-      if (key === 'smtp_host') def = 'smtp.gmail.com';
-      if (key === 'smtp_port') def = '587';
-      if (key === 'smtp_secure') def = 'false';
-      if (key === 'from_name') def = 'The VitaHub';
-      if (key === 'whatsapp_number') def = '01201450111';
-      if (key === 'receiving_number') def = '01009596452';
+    const allRows = await prisma.setting.findMany();
+    const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
-      settings[key] = await getSetting(prisma, key, def);
-    }
+    if (!settings.smtp_host) settings.smtp_host = 'smtp.gmail.com';
+    if (!settings.smtp_port) settings.smtp_port = '587';
+    if (!settings.smtp_secure) settings.smtp_secure = 'false';
+    if (!settings.from_name) settings.from_name = 'The VitaHub';
+    if (!settings.whatsapp_number) settings.whatsapp_number = '01201450111';
+    if (!settings.receiving_number) settings.receiving_number = '01009596452';
+
     res.json(settings);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1810,17 +1805,149 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
 app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
   const data = req.body;
   try {
-    const keys = [
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
-      'smtp_pass', 'from_email', 'from_name',
-      'whatsapp_number', 'receiving_number'
-    ];
-    for (const key of keys) {
-      if (data[key] !== undefined) {
-        await setSetting(prisma, key, String(data[key]));
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined && value !== null) {
+        await setSetting(prisma, key, String(value));
       }
     }
     res.json({ message: 'تم حفظ الإعدادات بنجاح' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Pixel & Analytics Endpoints ──────────────────
+app.post('/api/pixel-events', async (req, res) => {
+  try {
+    const { eventName, url, metadata, eventId, fbp, fbc } = req.body || {};
+    if (!eventName) {
+      return res.status(400).json({ error: 'eventName is required' });
+    }
+
+    const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || '').toString().split(',')[0].trim();
+    const userAgent = req.headers['user-agent'] || null;
+
+    let metaString = null;
+    if (metadata) {
+      metaString = typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+    }
+
+    const event = await prisma.pixelEvent.create({
+      data: {
+        eventName: String(eventName),
+        url: url ? String(url) : null,
+        metadata: metaString,
+        eventId: eventId ? String(eventId) : null,
+        fbp: fbp ? String(fbp) : null,
+        fbc: fbc ? String(fbc) : null,
+        customerIp: clientIp || null,
+        userAgent
+      }
+    });
+
+    res.status(201).json({ success: true, id: event.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/pixel-stats', adminAuthenticate, async (req, res) => {
+  try {
+    const totalEvents = await prisma.pixelEvent.count();
+
+    const counts = await prisma.pixelEvent.groupBy({
+      by: ['eventName'],
+      _count: { id: true }
+    });
+    const eventCounts = Object.fromEntries(counts.map(c => [c.eventName, c._count.id]));
+
+    const distinctIps = await prisma.pixelEvent.findMany({
+      distinct: ['customerIp'],
+      select: { customerIp: true },
+      where: { customerIp: { not: null } }
+    });
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentEvents = await prisma.pixelEvent.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      select: { eventName: true, createdAt: true },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const dayMap = new Map();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dayKey = d.toISOString().substring(0, 10);
+      dayMap.set(dayKey, { date: dayKey, total: 0, PageView: 0, ViewContent: 0, AddToCart: 0, Purchase: 0 });
+    }
+
+    for (const ev of recentEvents) {
+      const dayKey = ev.createdAt.toISOString().substring(0, 10);
+      if (dayMap.has(dayKey)) {
+        const item = dayMap.get(dayKey);
+        item.total++;
+        if (item[ev.eventName] !== undefined) {
+          item[ev.eventName]++;
+        }
+      }
+    }
+
+    res.json({
+      totalEvents,
+      uniqueVisitors: distinctIps.length,
+      eventCounts,
+      chartData: Array.from(dayMap.values())
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/pixel-events', adminAuthenticate, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const search = (req.query.search || '').trim();
+
+    const where = {};
+    if (search) {
+      where.OR = [
+        { eventName: { contains: search, mode: 'insensitive' } },
+        { url: { contains: search, mode: 'insensitive' } },
+        { customerIp: { contains: search, mode: 'insensitive' } },
+        { metadata: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+
+    const [events, total] = await Promise.all([
+      prisma.pixelEvent.findMany({
+        where,
+        take: limit,
+        skip: offset,
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.pixelEvent.count({ where })
+    ]);
+
+    const formattedEvents = events.map((ev) => {
+      let parsedMeta = null;
+      if (ev.metadata) {
+        try {
+          parsedMeta = JSON.parse(ev.metadata);
+        } catch (e) {
+          parsedMeta = ev.metadata;
+        }
+      }
+      return {
+        ...ev,
+        metadata: parsedMeta
+      };
+    });
+
+    res.json({ events: formattedEvents, total });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2381,109 +2508,33 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
   const filePath = req.file.path;
 
   try {
-    const { execFile } = require('child_process');
-    const pythonScript = path.join(__dirname, 'src', 'utils', 'parse_excel.py');
+    const { importProductsFromExcel } = require('./src/services/excelImportService');
+    const result = await importProductsFromExcel(filePath, prisma);
 
-    // Run the Python script to parse the Excel file
-    execFile('python', [pythonScript, filePath], async (error, stdout, stderr) => {
-      // Clean up the uploaded file
-      try {
+    try {
+      if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-      } catch (unlinkErr) {
-        console.error('Failed to delete uploaded temp file:', unlinkErr);
       }
+    } catch (unlinkErr) {
+      console.error('Failed to delete uploaded temp file:', unlinkErr);
+    }
 
-      if (error) {
-        console.error('Python execution error:', error, stderr);
-        return res.status(500).json({ error: `Failed to parse Excel file: ${stderr || error.message}` });
-      }
-
-      try {
-        const parsed = JSON.parse(stdout);
-        if (parsed.error) {
-          return res.status(400).json({ error: parsed.error });
-        }
-
-        // Upsert the default category "فيتامينات ومعادن"
-        const category = await prisma.category.upsert({
-          where: { name: "فيتامينات ومعادن" },
-          update: {},
-          create: { name: "فيتامينات ومعادن", nameEn: "Vitamins & Minerals" }
-        });
-
-        let importedCount = 0;
-        let updatedCount = 0;
-
-        // Process products sequentially
-        for (const item of parsed) {
-          const brandName = (item.brand || "Other").trim();
-          
-          // Find or create the brand
-          const brand = await prisma.brand.upsert({
-            where: { name: brandName },
-            update: {},
-            create: { name: brandName }
-          });
-
-          // Check if product with this title exists
-          const existingProduct = await prisma.product.findFirst({
-            where: { title: item.title }
-          });
-
-          if (existingProduct) {
-            await prisma.product.update({
-              where: { id: existingProduct.id },
-              data: {
-                price: item.price !== null ? item.price : existingProduct.price,
-                expiryDate: item.expiryDate || existingProduct.expiryDate,
-                categoryId: category.id,
-                brandId: brand.id
-              }
-            });
-            updatedCount++;
-            // Trigger background SEO if the existing product lacks description details
-            if (!existingProduct.desc || existingProduct.desc.trim().length < 100) {
-              addToSeoQueue(existingProduct.id);
-            }
-          } else {
-            const product = await prisma.product.create({
-              data: {
-                title: item.title,
-                price: item.price !== null ? item.price : 0,
-                expiryDate: item.expiryDate,
-                image: 'https://placehold.co/400x400?text=No+Image',
-                categoryId: category.id,
-                brandId: brand.id
-              }
-            });
-            // Optional: Notify Google Indexing API for new products (both old and new URLs)
-            notifyGoogleIndexing(`${SITE_URL}/product/${product.id}`, 'URL_UPDATED');
-            const slugParam = getProductUrlParam(product);
-            if (slugParam !== product.id) {
-              notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
-            }
-            importedCount++;
-            // Trigger background SEO for the newly created product
-            addToSeoQueue(product.id);
-          }
-        }
-
-        res.json({
-          success: true,
-          message: `تم استيراد ${importedCount} منتج جديد وتحديث ${updatedCount} منتج بنجاح.`,
-          importedCount,
-          updatedCount
-        });
-
-      } catch (parseErr) {
-        console.error('Failed to parse Python script output:', parseErr, stdout);
-        res.status(500).json({ error: 'Failed to process Excel data output.' });
-      }
+    res.json({
+      success: true,
+      message: result.message,
+      totalRows: result.totalRows,
+      importedCount: result.importedCount,
+      updatedCount: result.updatedCount
     });
-
   } catch (err) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (_) {}
+
     console.error('Import Excel error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message || 'Failed to process Excel file' });
   }
 });
 
@@ -3127,72 +3178,15 @@ app.post('/api/orders/:id/ship', adminAuthenticate, async (req, res) => {
 });
 
 // ── Backup & Restore Endpoints ────────────────────────────────
-const AdmZip = require('adm-zip');
+const { generateFullStoreBackup, restoreFullStoreBackup } = require('./src/services/backupService');
 
 app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
   try {
-    const zip = new AdmZip();
-
-    // Check which tables are available and fetch their data
-    const tables = [
-      'user',
-      'category',
-      'brand',
-      'product',
-      'offer',
-      'blog',
-      'hero',
-      'order',
-      'orderItem',
-      'imageStore',
-      'medicalTip'
-    ];
-
-    const dbData = {};
-    for (const table of tables) {
-      try {
-        dbData[table] = await prisma[table].findMany();
-      } catch (err) {
-        console.warn(`Table "${table}" is not available. Skipping backup for this table. Error:`, err.message);
-        dbData[table] = [];
-      }
-    }
-
-    // Save imageStore binary files separately to prevent JSON size issues
-    if (dbData.imageStore && dbData.imageStore.length > 0) {
-      for (const row of dbData.imageStore) {
-        if (row.data) {
-          const dataBuffer = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data.data || row.data);
-          zip.addFile(`imageStore/${row.id}_data.bin`, dataBuffer);
-          delete row.data;
-        }
-        if (row.thumbnailData) {
-          const thumbBuffer = Buffer.isBuffer(row.thumbnailData) ? row.thumbnailData : Buffer.from(row.thumbnailData.data || row.thumbnailData);
-          zip.addFile(`imageStore/${row.id}_thumb.bin`, thumbBuffer);
-          delete row.thumbnailData;
-        }
-      }
-    }
-
-    // Add database.json to zip
-    zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
-
-    // Add uploads directory to zip
     const uploadsDir = path.join(__dirname, 'uploads');
-    if (fs.existsSync(uploadsDir)) {
-      const files = fs.readdirSync(uploadsDir);
-      for (const file of files) {
-        const filePath = path.join(uploadsDir, file);
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
-          zip.addLocalFile(filePath, 'uploads');
-        }
-      }
-    }
-
-    const zipBuffer = zip.toBuffer();
+    const zipBuffer = await generateFullStoreBackup(prisma, uploadsDir);
+    const dateStr = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename=mithaly-backup.zip');
+    res.setHeader('Content-Disposition', `attachment; filename=mithaly-backup-${dateStr}.zip`);
     res.send(zipBuffer);
   } catch (error) {
     console.error('Backup error:', error);
@@ -3203,134 +3197,12 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
 app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No backup file uploaded' });
   try {
-    const zip = new AdmZip(req.file.buffer);
-    const databaseEntry = zip.getEntry('database.json');
-    if (!databaseEntry) {
-      return res.status(400).json({ error: 'Invalid backup file: database.json is missing' });
-    }
-
-    const dbData = JSON.parse(zip.readAsText(databaseEntry));
-
-    // Extract uploads
     const uploadsDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
-
-    const zipEntries = zip.getEntries();
-    for (const entry of zipEntries) {
-      if (entry.entryName.startsWith('uploads/') && !entry.isDirectory) {
-        const fileName = entry.name;
-        const targetPath = path.join(uploadsDir, fileName);
-        fs.writeFileSync(targetPath, entry.getData());
-      }
-    }
-
-    // Check which tables are available in the database to avoid transaction crashes
-    const tables = [
-      'user',
-      'category',
-      'brand',
-      'product',
-      'offer',
-      'blog',
-      'hero',
-      'order',
-      'orderItem',
-      'imageStore',
-      'medicalTip'
-    ];
-
-    const availableTables = {};
-    for (const table of tables) {
-      try {
-        await prisma[table].findMany({ take: 1 });
-        availableTables[table] = true;
-      } catch (err) {
-        console.warn(`Table "${table}" is not available in the database. It will be skipped during restore.`);
-        availableTables[table] = false;
-      }
-    }
-
-    // Restore Database records inside a Transaction
-    await prisma.$transaction(async (tx) => {
-      // 1. Delete all tables in reverse dependency order (if available)
-      if (availableTables.orderItem) await tx.orderItem.deleteMany();
-      if (availableTables.order) await tx.order.deleteMany();
-      if (availableTables.product) await tx.product.deleteMany();
-      if (availableTables.category) await tx.category.deleteMany();
-      if (availableTables.brand) await tx.brand.deleteMany();
-      if (availableTables.offer) await tx.offer.deleteMany();
-      if (availableTables.blog) await tx.blog.deleteMany();
-      if (availableTables.hero) await tx.hero.deleteMany();
-      if (availableTables.medicalTip) await tx.medicalTip.deleteMany();
-      if (availableTables.imageStore) await tx.imageStore.deleteMany();
-      if (availableTables.user) await tx.user.deleteMany();
-
-      // 2. Insert records in dependency order (if available)
-      if (availableTables.user && dbData.user && dbData.user.length > 0) {
-        await tx.user.createMany({ data: dbData.user });
-      }
-      
-      if (availableTables.category && dbData.category && dbData.category.length > 0) {
-        await tx.category.createMany({ data: dbData.category });
-      }
-
-      if (availableTables.brand && dbData.brand && dbData.brand.length > 0) {
-        await tx.brand.createMany({ data: dbData.brand });
-      }
-
-      if (availableTables.product && dbData.product && dbData.product.length > 0) {
-        await tx.product.createMany({ data: dbData.product });
-      }
-
-      if (availableTables.order && dbData.order && dbData.order.length > 0) {
-        await tx.order.createMany({ data: dbData.order });
-      }
-
-      if (availableTables.orderItem && dbData.orderItem && dbData.orderItem.length > 0) {
-        await tx.orderItem.createMany({ data: dbData.orderItem });
-      }
-
-      if (availableTables.offer && dbData.offer && dbData.offer.length > 0) {
-        await tx.offer.createMany({ data: dbData.offer });
-      }
-
-      if (availableTables.blog && dbData.blog && dbData.blog.length > 0) {
-        await tx.blog.createMany({ data: dbData.blog });
-      }
-
-      if (availableTables.hero && dbData.hero && dbData.hero.length > 0) {
-        await tx.hero.createMany({ data: dbData.hero });
-      }
-
-      if (availableTables.medicalTip && dbData.medicalTip && dbData.medicalTip.length > 0) {
-        await tx.medicalTip.createMany({ data: dbData.medicalTip });
-      }
-
-      if (availableTables.imageStore && dbData.imageStore && dbData.imageStore.length > 0) {
-        // Resolve binaries from ZIP first
-        for (const row of dbData.imageStore) {
-          const dataEntry = zip.getEntry(`imageStore/${row.id}_data.bin`);
-          if (dataEntry) {
-            row.data = dataEntry.getData();
-          }
-          const thumbEntry = zip.getEntry(`imageStore/${row.id}_thumb.bin`);
-          if (thumbEntry) {
-            row.thumbnailData = thumbEntry.getData();
-          }
-        }
-
-        const imageStoresToInsert = dbData.imageStore.map(item => ({
-          ...item,
-          data: item.data ? (Buffer.isBuffer(item.data) ? item.data : Buffer.from(item.data.data || item.data)) : undefined,
-          thumbnailData: item.thumbnailData ? (Buffer.isBuffer(item.thumbnailData) ? item.thumbnailData : Buffer.from(item.thumbnailData.data || item.thumbnailData)) : undefined
-        }));
-        await tx.imageStore.createMany({ data: imageStoresToInsert });
-      }
+    const result = await restoreFullStoreBackup(prisma, req.file.buffer, uploadsDir, req.user);
+    res.json({
+      message: 'تم استعادة النسخة الاحتياطية بنجاح مع الحفاظ على الروابط والـ SEO',
+      ...result
     });
-
-    res.json({ message: 'Backup restored successfully' });
   } catch (error) {
     console.error('Restore error:', error);
     res.status(500).json({ error: 'Failed to restore backup: ' + error.message });
