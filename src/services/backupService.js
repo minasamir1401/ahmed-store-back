@@ -56,8 +56,10 @@ async function downloadAndCacheImage(url, baseName, uploadsDir) {
   }
 }
 
-async function generateFullStoreBackup(prisma, uploadsDir) {
-  if (!fs.existsSync(uploadsDir)) {
+async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
+  const includeMedia = options.includeMedia !== false;
+
+  if (includeMedia && !fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
 
@@ -86,82 +88,32 @@ async function generateFullStoreBackup(prisma, uploadsDir) {
 
   const dbData = {};
   const recordCounts = {};
-  for (const table of tables) {
-    try {
-      if (prisma[table]) {
-        const rows = await prisma[table].findMany();
-        dbData[table] = rows;
-        recordCounts[table] = rows.length;
-      } else {
+
+  await Promise.all(
+    tables.map(async (table) => {
+      try {
+        if (prisma[table]) {
+          const rows = await prisma[table].findMany();
+          dbData[table] = rows;
+          recordCounts[table] = rows.length;
+        } else {
+          dbData[table] = [];
+          recordCounts[table] = 0;
+        }
+      } catch (err) {
+        console.warn(`[Backup] Table "${table}" fetch warning: ${err.message}`);
         dbData[table] = [];
         recordCounts[table] = 0;
       }
-    } catch (err) {
-      console.warn(`[Backup] Table "${table}" fetch warning: ${err.message}`);
-      dbData[table] = [];
-      recordCounts[table] = 0;
-    }
-  }
-
-  // Ensure all products have their images saved locally into uploads/ before zipping
-  if (dbData.product && dbData.product.length > 0) {
-    for (let i = 0; i < dbData.product.length; i++) {
-      const p = dbData.product[i];
-
-      // Download main image if still external
-      if (p.image && (p.image.startsWith('http://') || p.image.startsWith('https://'))) {
-        const localMain = await downloadAndCacheImage(p.image, `prod-${p.id}-main`, uploadsDir);
-        if (localMain) {
-          p.image = localMain;
-          await prisma.product.update({
-            where: { id: p.id },
-            data: { image: localMain }
-          }).catch(() => {});
-        }
-      }
-
-      // Download gallery images if still external
-      if (p.images) {
-        try {
-          const parsed = JSON.parse(p.images);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            let changed = false;
-            const updated = [];
-            for (let g = 0; g < parsed.length; g++) {
-              const gUrl = parsed[g];
-              if (typeof gUrl === 'string' && (gUrl.startsWith('http://') || gUrl.startsWith('https://'))) {
-                const localG = await downloadAndCacheImage(gUrl, `prod-${p.id}-gallery-${g}`, uploadsDir);
-                if (localG) {
-                  updated.push(localG);
-                  changed = true;
-                } else {
-                  updated.push(gUrl);
-                }
-              } else {
-                updated.push(gUrl);
-              }
-            }
-            if (changed) {
-              p.images = JSON.stringify(updated);
-              await prisma.product.update({
-                where: { id: p.id },
-                data: { images: p.images }
-              }).catch(() => {});
-            }
-          }
-        } catch (e) {}
-      }
-    }
-  }
+    })
+  );
 
   const zip = new AdmZip();
 
-  // 1. Pack database.json (contains 100% of all tables)
   zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
 
-  // 2. Pack manifest.json with metadata and table record counts
   let uploadFilesCount = 0;
-  if (fs.existsSync(uploadsDir)) {
+  if (includeMedia && fs.existsSync(uploadsDir)) {
     const files = fs.readdirSync(uploadsDir);
     for (const file of files) {
       const filePath = path.join(uploadsDir, file);
@@ -176,16 +128,19 @@ async function generateFullStoreBackup(prisma, uploadsDir) {
   }
 
   const manifest = {
-    version: '2.0.0',
+    version: '2.1.0',
+    type: includeMedia ? 'full' : 'data',
     generatedAt: new Date().toISOString(),
-    description: 'Comprehensive store backup containing 100% database tables, logs, settings, and media files',
+    description: includeMedia
+      ? 'Comprehensive store backup containing 100% database tables, logs, settings, and media files'
+      : 'Lightweight database backup containing 100% store tables, settings, and logs',
     tables: recordCounts,
     totalRecords: Object.values(recordCounts).reduce((acc, c) => acc + c, 0),
     uploadedFilesCount: uploadFilesCount
   };
   zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
 
-  return zip.toBuffer();
+  return await zip.toBufferPromise();
 }
 
 async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdminUser) {
@@ -560,6 +515,9 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
       }));
       await tx.pixelEvent.createMany({ data: sanitizedPixelEvents });
     }
+  }, {
+    timeout: 60000,
+    maxWait: 10000
   });
 
   // Re-sync WhatsApp authentication files to disk if session data was restored

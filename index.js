@@ -266,14 +266,9 @@ prisma.$connect()
         console.log('Default admin user created successfully');
       }
 
-      // Seed default settings if they do not exist
       const defaultSettings = [
-        { key: 'smtp_host', value: 'smtp.gmail.com' },
-        { key: 'smtp_port', value: '587' },
-        { key: 'smtp_secure', value: 'false' },
-        { key: 'smtp_user', value: '' },
-        { key: 'smtp_pass', value: '' },
-        { key: 'from_email', value: '' },
+        { key: 'resend_api_key', value: process.env.RESEND_API_KEY || '' },
+        { key: 'from_email', value: process.env.RESEND_FROM_EMAIL || 'orders@the-vitahub.com' },
         { key: 'from_name', value: 'The VitaHub' },
         { key: 'whatsapp_number', value: '01201450111' },
         { key: 'receiving_number', value: '01009596452' }
@@ -1789,9 +1784,13 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
     const allRows = await prisma.setting.findMany();
     const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
-    if (!settings.smtp_host) settings.smtp_host = 'smtp.gmail.com';
-    if (!settings.smtp_port) settings.smtp_port = '587';
-    if (!settings.smtp_secure) settings.smtp_secure = 'false';
+    if (!settings.resend_api_key) settings.resend_api_key = process.env.RESEND_API_KEY || '';
+    if (!settings.smtp_host) settings.smtp_host = 'smtp.resend.com';
+    if (!settings.smtp_port) settings.smtp_port = '465';
+    if (!settings.smtp_secure) settings.smtp_secure = 'true';
+    if (!settings.smtp_user) settings.smtp_user = 'resend';
+    if (!settings.smtp_pass) settings.smtp_pass = settings.resend_api_key;
+    if (!settings.from_email) settings.from_email = 'orders@the-vitahub.com';
     if (!settings.from_name) settings.from_name = 'The VitaHub';
     if (!settings.whatsapp_number) settings.whatsapp_number = '01201450111';
     if (!settings.receiving_number) settings.receiving_number = '01009596452';
@@ -1957,24 +1956,20 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'البريد الإلكتروني للمستلم مطلوب' });
   try {
-    const keys = [
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user',
-      'smtp_pass', 'from_email', 'from_name'
-    ];
+    const keys = ['resend_api_key', 'from_email', 'from_name'];
     const settings = {};
     for (const key of keys) {
       let def = '';
-      if (key === 'smtp_host') def = 'smtp.gmail.com';
-      if (key === 'smtp_port') def = '587';
-      if (key === 'smtp_secure') def = 'false';
+      if (key === 'resend_api_key') def = process.env.RESEND_API_KEY || '';
+      if (key === 'from_email') def = 'orders@the-vitahub.com';
       if (key === 'from_name') def = 'The VitaHub';
       settings[key] = await getSetting(prisma, key, def);
     }
     const { sendTestEmail } = require('./src/services/emailService');
-    await sendTestEmail(settings, to);
-    res.json({ message: 'تم إرسال بريد إلكتروني تجريبي بنجاح' });
+    const result = await sendTestEmail(settings, to);
+    res.json({ message: 'تم إرسال البريد الإلكتروني بنجاح عبر منصة Resend', result });
   } catch (error) {
-    console.error('SMTP test email error:', error);
+    console.error('Resend test email error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3183,10 +3178,13 @@ const { generateFullStoreBackup, restoreFullStoreBackup } = require('./src/servi
 app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
   try {
     const uploadsDir = path.join(__dirname, 'uploads');
-    const zipBuffer = await generateFullStoreBackup(prisma, uploadsDir);
+    const type = req.query.type || 'full';
+    const includeMedia = type !== 'data' && req.query.media !== 'false';
+    const zipBuffer = await generateFullStoreBackup(prisma, uploadsDir, { includeMedia });
     const dateStr = new Date().toISOString().slice(0, 10);
+    const filenamePrefix = includeMedia ? 'mithaly-full-backup' : 'mithaly-data-backup';
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename=mithaly-backup-${dateStr}.zip`);
+    res.setHeader('Content-Disposition', `attachment; filename=${filenamePrefix}-${dateStr}.zip`);
     res.send(zipBuffer);
   } catch (error) {
     console.error('Backup error:', error);

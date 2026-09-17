@@ -1,19 +1,79 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-// Helper to get settings dynamically from the database
 async function getSetting(prisma, key, defaultValue) {
   try {
     const setting = await prisma.setting.findUnique({ where: { key } });
-    return setting ? setting.value : defaultValue;
+    return setting && setting.value ? setting.value : defaultValue;
   } catch (err) {
     console.error(`Error getting setting ${key}:`, err);
     return defaultValue;
   }
 }
 
-/**
- * Sends a confirmation email to the customer after order placement.
- */
+async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html }) {
+  const senderAddress = fromEmail || 'orders@the-vitahub.com';
+  const senderDisplayName = fromName || 'The VitaHub';
+  const from = `"${senderDisplayName}" <${senderAddress}>`;
+  const recipients = Array.isArray(to) ? to : [to];
+
+  const resend = new Resend(apiKey);
+
+  try {
+    const { data, error } = await resend.emails.send({
+      from,
+      to: recipients,
+      subject,
+      html
+    });
+
+    if (error) {
+      throw new Error(error.message || 'Resend SDK error');
+    }
+    return data;
+  } catch (sdkError) {
+    const isDomainPending = sdkError.message && sdkError.message.includes('domain is not verified');
+    const isOwnerRecipient = recipients.some(r => String(r).toLowerCase().includes('mina15g4y@gmail.com'));
+
+    if (isDomainPending && isOwnerRecipient && !from.includes('onboarding@resend.dev')) {
+      console.warn('Custom domain is pending Resend verification; using onboarding@resend.dev bridge for owner recipient...');
+      const fallbackFrom = `"${senderDisplayName}" <onboarding@resend.dev>`;
+      const { data, error } = await resend.emails.send({
+        from: fallbackFrom,
+        to: recipients,
+        subject,
+        html
+      });
+      if (!error && data) {
+        return data;
+      }
+    }
+
+    console.warn(`Resend SDK call encountered: ${sdkError.message}. Attempting direct Resend REST API...`);
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from,
+        to: recipients,
+        subject,
+        html
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      if (isDomainPending) {
+        throw new Error('نطاق the-vitahub.com قيد التحقق حالياً في لوحة تحكم Resend. يرجى الانتظار لاكتمال انتشار DNS أو النقر على Verify Domain في لوحة تحكم Resend.');
+      }
+      throw new Error(data.message || data.error || 'Failed to send email via Resend API');
+    }
+    return data;
+  }
+}
+
 async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
   try {
     const to = order.customerEmail;
@@ -22,30 +82,12 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
       return false;
     }
 
-    const host = await getSetting(prisma, 'smtp_host', 'smtp.gmail.com');
-    const port = parseInt(await getSetting(prisma, 'smtp_port', '587'), 10);
-    const secureSetting = await getSetting(prisma, 'smtp_secure', 'false');
-    const secure = secureSetting === 'true';
-    const user = await getSetting(prisma, 'smtp_user', 'the.vitaminshub@gmail.com');
-    const pass = await getSetting(prisma, 'smtp_pass', 'xrnd iepd yhlo bjst');
-    const fromEmail = await getSetting(prisma, 'from_email', user);
+    const apiKey = process.env.RESEND_API_KEY || (await getSetting(prisma, 'resend_api_key', ''));
+    const fromEmail = await getSetting(prisma, 'from_email', 'orders@the-vitahub.com');
     const fromName = await getSetting(prisma, 'from_name', 'The VitaHub');
     const whatsappNumber = await getSetting(prisma, 'whatsapp_number', '01201450111');
     const receivingNumber = await getSetting(prisma, 'receiving_number', '01009596452');
     const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://the-vitahub.com';
-
-    if (!user || !pass) {
-      console.log('SMTP settings not fully configured (user/pass missing). Email skipped.');
-      return false;
-    }
-
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      auth: { user, pass },
-      tls: { rejectUnauthorized: false }
-    });
 
     const isEn = language === 'en';
     const currencyText = isEn ? 'EGP' : 'ج.م';
@@ -76,7 +118,7 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
       )}`;
       paymentInstructions = isEn ? `
         <div style="margin-top: 24px; padding: 20px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 12px; text-align: left; direction: ltr;">
-          <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">⚠️ Payment & Receipt Instructions</h4>
+          <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">Payment and Receipt Instructions</h4>
           <p style="margin: 0 0 12px 0; color: #d97706; font-size: 14px; line-height: 1.6;">
             Please transfer the amount of <strong>${order.total} EGP</strong> to the following number via <strong>InstaPay</strong> or any electronic wallet (Vodafone Cash, etc.):
           </p>
@@ -88,13 +130,13 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
           </p>
           <div style="text-align: center;">
             <a href="${waLink}" target="_blank" style="display: inline-block; background-color: #25d366; color: #ffffff; padding: 12px 24px; border-radius: 8px; font-weight: bold; text-decoration: none; font-size: 14px; box-shadow: 0 4px 6px rgba(37, 211, 102, 0.15);">
-              Send Receipt via WhatsApp 💬
+              Send Receipt via WhatsApp
             </a>
           </div>
         </div>
       ` : `
         <div style="margin-top: 24px; padding: 20px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 12px; text-align: right; direction: rtl;">
-          <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">⚠️ تعليمات الدفع وإرسال الإيصال</h4>
+          <h4 style="margin: 0 0 10px 0; color: #b45309; font-size: 16px;">تعليمات الدفع وإرسال الإيصال</h4>
           <p style="margin: 0 0 12px 0; color: #d97706; font-size: 14px; line-height: 1.6;">
             يرجى تحويل مبلغ <strong>${order.total} ج.م</strong> إلى الرقم التالي عبر تطبيق <strong>إنستاباي (Instapay)</strong> أو أي محفظة إلكترونية (فودافون كاش، إلخ):
           </p>
@@ -106,7 +148,7 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
           </p>
           <div style="text-align: center;">
             <a href="${waLink}" target="_blank" style="display: inline-block; background-color: #25d366; color: #ffffff; padding: 12px 24px; border-radius: 8px; font-weight: bold; text-decoration: none; font-size: 14px; box-shadow: 0 4px 6px rgba(37, 211, 102, 0.15);">
-              إرسال الإيصال عبر الواتساب 💬
+              إرسال الإيصال عبر الواتساب
             </a>
           </div>
         </div>
@@ -254,60 +296,52 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
       </html>
     `;
 
-    await transporter.sendMail({
-      from: `"${fromName}" <${fromEmail}>`,
+    await sendViaResend({
+      apiKey,
+      fromEmail,
+      fromName,
       to,
       subject: emailSubject,
       html: htmlContent
     });
-    console.log(`Order confirmation email (${language}) sent successfully to ${to}`);
+    console.log(`Order confirmation email (${language}) sent successfully via Resend to ${to}`);
     return true;
   } catch (err) {
-    console.error('Error sending order confirmation email:', err);
+    console.error('Error sending order confirmation email via Resend:', err);
     return false;
   }
 }
 
-/**
- * Sends a test email to verify SMTP credentials.
- */
 async function sendTestEmail(settings, toEmail) {
-  const host = settings.smtp_host || 'smtp.gmail.com';
-  const port = parseInt(settings.smtp_port || '587', 10);
-  const secure = settings.smtp_secure === 'true';
-  const user = settings.smtp_user;
-  const pass = settings.smtp_pass;
-  const fromEmail = settings.from_email || user;
+  const apiKey = settings.resend_api_key || process.env.RESEND_API_KEY || '';
+  const fromEmail = settings.from_email || 'orders@the-vitahub.com';
   const fromName = settings.from_name || 'The VitaHub';
 
-  if (!user || !pass) {
-    throw new Error('اسم المستخدم أو كلمة المرور الخاصة بـ SMTP غير مدخلة.');
+  if (!apiKey) {
+    throw new Error('مفتاح API الخاص بـ Resend غير مدخل.');
   }
 
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    tls: { rejectUnauthorized: false }
-  });
-
-  await transporter.sendMail({
-    from: `"${fromName}" <${fromEmail}>`,
-    to: toEmail,
-    subject: 'رسالة تجريبية من لوحة تحكم The VitaHub',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; text-align: right; direction: rtl;">
-        <h2 style="color: #10b981; text-align: center;">اتصال SMTP ناجح! 🎉</h2>
-        <p style="font-size: 14px; color: #4a5568; line-height: 1.6;">
-          مرحباً، هذه رسالة تجريبية تم إرسالها من لوحة تحكم <strong>The VitaHub</strong> لتأكيد أن إعدادات خادم البريد SMTP تعمل بشكل صحيح وسليم تماماً.
-        </p>
-        <hr style="border: 0; border-top: 1px solid #edf2f7; margin: 20px 0;" />
-        <div style="font-size: 12px; color: #a0aec0; text-align: center;" dir="ltr">
-          Mail Server: ${host}:${port} • Secure: ${secure ? 'SSL' : 'TLS'} • User: ${user}
-        </div>
+  const subject = 'رسالة تجريبية من لوحة تحكم The VitaHub عبر منصة Resend';
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; text-align: right; direction: rtl;">
+      <h2 style="color: #10b981; text-align: center;">اتصال Resend ناجح</h2>
+      <p style="font-size: 14px; color: #4a5568; line-height: 1.6;">
+        مرحباً، هذه رسالة تجريبية تم إرسالها من متجر <strong>The VitaHub</strong> عبر منصة <strong>Resend</strong> الرسمية للتأكد من نجاح ربط مفتاح الـ API وصلاحية الإرسال.
+      </p>
+      <hr style="border: 0; border-top: 1px solid #edf2f7; margin: 20px 0;" />
+      <div style="font-size: 12px; color: #a0aec0; text-align: center;" dir="ltr">
+        Sender: ${fromName} &lt;${fromEmail}&gt; • Provider: Resend Cloud
       </div>
-    `
+    </div>
+  `;
+
+  return await sendViaResend({
+    apiKey,
+    fromEmail,
+    fromName,
+    to: toEmail,
+    subject,
+    html
   });
 }
 
