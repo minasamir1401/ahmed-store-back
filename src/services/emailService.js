@@ -11,7 +11,18 @@ async function getSetting(prisma, key, defaultValue) {
   }
 }
 
-async function sendViaSmtp({ host, port, secure, user, pass, fromEmail, fromName, to, subject, html }) {
+function htmlToPlainText(html) {
+  if (!html) return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function sendViaSmtp({ host, port, secure, user, pass, fromEmail, fromName, to, subject, html, replyTo }) {
   if (!host || !user || !pass) {
     throw new Error('SMTP host, user, and password are required');
   }
@@ -33,18 +44,21 @@ async function sendViaSmtp({ host, port, secure, user, pass, fromEmail, fromName
   const senderDisplayName = fromName || 'The VitaHub';
   const from = `"${senderDisplayName}" <${senderAddress}>`;
   const recipients = Array.isArray(to) ? to.join(', ') : to;
+  const plainText = htmlToPlainText(html);
 
   const info = await transporter.sendMail({
     from,
     to: recipients,
+    replyTo: replyTo || 'the.vitaminshub@gmail.com',
     subject,
+    text: plainText,
     html
   });
 
   return { id: info.messageId, provider: 'smtp' };
 }
 
-async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html }) {
+async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, replyTo }) {
   let senderAddress = fromEmail || 'orders@the-vitahub.com';
   const isFreeWebmail = /@(gmail|yahoo|hotmail|outlook|live|icloud)\.com$/i.test(senderAddress);
   if (isFreeWebmail) {
@@ -54,6 +68,8 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html })
   const senderDisplayName = fromName || 'The VitaHub';
   const from = `"${senderDisplayName}" <${senderAddress}>`;
   const recipients = Array.isArray(to) ? to : [to];
+  const plainText = htmlToPlainText(html);
+  const replyToAddress = replyTo || 'the.vitaminshub@gmail.com';
 
   const resend = new Resend(apiKey);
 
@@ -61,7 +77,9 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html })
     const { data, error } = await resend.emails.send({
       from,
       to: recipients,
+      reply_to: replyToAddress,
       subject,
+      text: plainText,
       html
     });
 
@@ -106,9 +124,11 @@ async function dispatchEmail(prisma, { to, subject, html, settingsOverride = nul
 
   const isSmtpConfigured = Boolean(smtpHost && smtpHost !== 'smtp.resend.com' && smtpUser && smtpPass);
 
+  const adminEmail = settingsOverride?.admin_notification_email || (prisma ? await getSetting(prisma, 'admin_notification_email', process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com') : 'the.vitaminshub@gmail.com');
+
   if (apiKey) {
     try {
-      const result = await sendViaResend({ apiKey, fromEmail, fromName, to, subject, html });
+      const result = await sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, replyTo: adminEmail });
       return result;
     } catch (resendError) {
       console.warn(`[${context}] Resend dispatch failed: ${resendError.message}`);
@@ -124,7 +144,8 @@ async function dispatchEmail(prisma, { to, subject, html, settingsOverride = nul
           fromName,
           to,
           subject,
-          html
+          html,
+          replyTo: adminEmail
         });
       }
       throw resendError;
@@ -142,7 +163,8 @@ async function dispatchEmail(prisma, { to, subject, html, settingsOverride = nul
       fromName,
       to,
       subject,
-      html
+      html,
+      replyTo: adminEmail
     });
   }
 
