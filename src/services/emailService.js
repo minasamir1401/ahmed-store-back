@@ -1,4 +1,5 @@
 const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 
 async function getSetting(prisma, key, defaultValue) {
   try {
@@ -10,8 +11,46 @@ async function getSetting(prisma, key, defaultValue) {
   }
 }
 
+async function sendViaSmtp({ host, port, secure, user, pass, fromEmail, fromName, to, subject, html }) {
+  if (!host || !user || !pass) {
+    throw new Error('SMTP host, user, and password are required');
+  }
+
+  const portNum = Number(port) || 465;
+  const isSecure = String(secure) === 'true' || portNum === 465;
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port: portNum,
+    secure: isSecure,
+    auth: {
+      user,
+      pass
+    }
+  });
+
+  const senderAddress = fromEmail || user;
+  const senderDisplayName = fromName || 'The VitaHub';
+  const from = `"${senderDisplayName}" <${senderAddress}>`;
+  const recipients = Array.isArray(to) ? to.join(', ') : to;
+
+  const info = await transporter.sendMail({
+    from,
+    to: recipients,
+    subject,
+    html
+  });
+
+  return { id: info.messageId, provider: 'smtp' };
+}
+
 async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html }) {
-  const senderAddress = fromEmail || 'orders@the-vitahub.com';
+  let senderAddress = fromEmail || 'orders@the-vitahub.com';
+  const isFreeWebmail = /@(gmail|yahoo|hotmail|outlook|live|icloud)\.com$/i.test(senderAddress);
+  if (isFreeWebmail) {
+    senderAddress = 'orders@the-vitahub.com';
+  }
+
   const senderDisplayName = fromName || 'The VitaHub';
   const from = `"${senderDisplayName}" <${senderAddress}>`;
   const recipients = Array.isArray(to) ? to : [to];
@@ -29,16 +68,16 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html })
     if (error) {
       throw new Error(error.message || 'Resend SDK error');
     }
-    return data;
+    return { ...data, provider: 'resend' };
   } catch (sdkError) {
-    const isDomainPending = sdkError.message && sdkError.message.includes('domain is not verified');
+    const errMsg = sdkError.message || '';
+    const isDomainPending = errMsg.includes('domain is not verified') || errMsg.includes('only send testing emails');
     const isOwnerRecipient = recipients.some(r => {
       const lower = String(r).toLowerCase();
-      return lower.includes('the.vitaminshub@gmail.com') || lower.includes('mina15g4y@gmail.com');
+      return lower.includes('mina15g4y@gmail.com');
     });
 
     if (isDomainPending && isOwnerRecipient && !from.includes('onboarding@resend.dev')) {
-      console.warn('Custom domain is pending Resend verification; using onboarding@resend.dev bridge for owner recipient...');
       const fallbackFrom = `"${senderDisplayName}" <onboarding@resend.dev>`;
       const { data, error } = await resend.emails.send({
         from: fallbackFrom,
@@ -47,34 +86,67 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html })
         html
       });
       if (!error && data) {
-        return data;
+        return { ...data, provider: 'resend_sandbox' };
       }
     }
 
-    console.warn(`Resend SDK call encountered: ${sdkError.message}. Attempting direct Resend REST API...`);
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from,
-        to: recipients,
-        subject,
-        html
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      if (isDomainPending) {
-        throw new Error('نطاق the-vitahub.com قيد التحقق حالياً في لوحة تحكم Resend. يرجى الانتظار لاكتمال انتشار DNS أو النقر على Verify Domain في لوحة تحكم Resend.');
-      }
-      throw new Error(data.message || data.error || 'Failed to send email via Resend API');
-    }
-    return data;
+    throw sdkError;
   }
+}
+
+async function dispatchEmail(prisma, { to, subject, html, settingsOverride = null, context = 'email' }) {
+  const apiKey = settingsOverride?.resend_api_key || process.env.RESEND_API_KEY || (prisma ? await getSetting(prisma, 'resend_api_key', '') : '');
+  const smtpHost = settingsOverride?.smtp_host || (prisma ? await getSetting(prisma, 'smtp_host', process.env.SMTP_HOST || '') : process.env.SMTP_HOST || '');
+  const smtpPort = settingsOverride?.smtp_port || (prisma ? await getSetting(prisma, 'smtp_port', process.env.SMTP_PORT || '465') : process.env.SMTP_PORT || '465');
+  const smtpSecure = settingsOverride?.smtp_secure || (prisma ? await getSetting(prisma, 'smtp_secure', process.env.SMTP_SECURE || 'true') : process.env.SMTP_SECURE || 'true');
+  const smtpUser = settingsOverride?.smtp_user || (prisma ? await getSetting(prisma, 'smtp_user', process.env.SMTP_USER || '') : process.env.SMTP_USER || '');
+  const smtpPass = settingsOverride?.smtp_pass || (prisma ? await getSetting(prisma, 'smtp_pass', process.env.SMTP_PASS || '') : process.env.SMTP_PASS || '');
+  const fromEmail = settingsOverride?.from_email || (prisma ? await getSetting(prisma, 'from_email', process.env.RESEND_FROM_EMAIL || 'orders@the-vitahub.com') : 'orders@the-vitahub.com');
+  const fromName = settingsOverride?.from_name || (prisma ? await getSetting(prisma, 'from_name', process.env.RESEND_FROM_NAME || 'The VitaHub') : 'The VitaHub');
+
+  const isSmtpConfigured = Boolean(smtpHost && smtpHost !== 'smtp.resend.com' && smtpUser && smtpPass);
+
+  if (apiKey) {
+    try {
+      const result = await sendViaResend({ apiKey, fromEmail, fromName, to, subject, html });
+      return result;
+    } catch (resendError) {
+      console.warn(`[${context}] Resend dispatch failed: ${resendError.message}`);
+      if (isSmtpConfigured) {
+        console.log(`[${context}] Automatically falling back to SMTP delivery...`);
+        return await sendViaSmtp({
+          host: smtpHost,
+          port: smtpPort,
+          secure: smtpSecure,
+          user: smtpUser,
+          pass: smtpPass,
+          fromEmail,
+          fromName,
+          to,
+          subject,
+          html
+        });
+      }
+      throw resendError;
+    }
+  }
+
+  if (isSmtpConfigured) {
+    return await sendViaSmtp({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpSecure,
+      user: smtpUser,
+      pass: smtpPass,
+      fromEmail,
+      fromName,
+      to,
+      subject,
+      html
+    });
+  }
+
+  throw new Error('لم يتم ضبط وسيلة إرسال بريد إلكتروني صالحة (يرجى إدخال مفتاح Resend API أو إعدادات خادم SMTP)');
 }
 
 async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
@@ -299,18 +371,16 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
       </html>
     `;
 
-    await sendViaResend({
-      apiKey,
-      fromEmail,
-      fromName,
+    const result = await dispatchEmail(prisma, {
       to,
       subject: emailSubject,
-      html: htmlContent
+      html: htmlContent,
+      context: 'Customer Confirmation'
     });
-    console.log(`Order confirmation email (${language}) sent successfully via Resend to ${to}`);
+    console.log(`Order confirmation email (${language}) sent successfully [${result.provider || 'email'}] to ${to}`);
     return true;
   } catch (err) {
-    console.error('Error sending order confirmation email via Resend:', err);
+    console.error(`Error sending order confirmation email to ${to}:`, err.message || err);
     return false;
   }
 }
@@ -323,14 +393,6 @@ async function sendAdminOrderNotificationEmail(prisma, order) {
       return false;
     }
 
-    const apiKey = process.env.RESEND_API_KEY || (await getSetting(prisma, 'resend_api_key', ''));
-    if (!apiKey) {
-      console.warn('Skipping admin order notification email: RESEND_API_KEY is not configured');
-      return false;
-    }
-
-    const fromEmail = await getSetting(prisma, 'from_email', 'orders@the-vitahub.com');
-    const fromName = await getSetting(prisma, 'from_name', 'The VitaHub Orders');
     const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
 
     const orderDateFormatted = new Date(order.createdAt || Date.now()).toLocaleDateString('ar-EG', {
@@ -429,39 +491,45 @@ async function sendAdminOrderNotificationEmail(prisma, order) {
               <div class="row">
                 <span class="label">رقم الهاتف:</span>
                 <span class="value">
-                  <a href="tel:${order.customerPhone}" style="color: #10b981; text-decoration: none;">${order.customerPhone}</a>
-                  ${waLink ? `&nbsp;|&nbsp;<a href="${waLink}" target="_blank" style="color: #25d366; text-decoration: none;">مراسلة واتساب</a>` : ''}
+                  ${order.customerPhone} 
+                  ${waLink ? `<a href="${waLink}" target="_blank" style="color: #25d366; text-decoration: none; margin-right: 8px;">(واتساب)</a>` : ''}
                 </span>
               </div>
               <div class="row"><span class="label">البريد الإلكتروني:</span><span class="value">${customerEmailDisplay}</span></div>
-              <div class="row"><span class="label">عنوان التوصيل:</span><span class="value">${addressParts}</span></div>
               <div class="row"><span class="label">تاريخ الطلب:</span><span class="value">${orderDateFormatted}</span></div>
               <div class="row"><span class="label">طريقة الدفع:</span><span class="value">${paymentMethodText}</span></div>
+            </div>
+
+            <div class="card">
+              <div class="card-title">تفاصيل الشحن والتوصيل</div>
+              <div class="row"><span class="label">المحافظة:</span><span class="value">${order.governorate || 'غير محدد'}</span></div>
+              <div class="row"><span class="label">المنطقة / المركز:</span><span class="value">${order.district || 'غير محدد'}</span></div>
+              <div class="row"><span class="label">العنوان التفصيلي:</span><span class="value">${addressParts || 'غير محدد'}</span></div>
               ${notesHtml}
             </div>
 
             <div class="card">
-              <div class="card-title">المنتجات المطلوبة</div>
+              <div class="card-title">الأصناف المطلوبة (${(order.items || []).length})</div>
               <table class="table-container">
                 <thead>
                   <tr class="table-header">
                     <th>المنتج</th>
                     <th style="text-align: center; width: 60px;">الكمية</th>
-                    <th style="text-align: left; width: 90px;">السعر</th>
+                    <th style="text-align: left; width: 100px;">السعر</th>
                     <th style="text-align: left; width: 100px;">الإجمالي</th>
                   </tr>
                 </thead>
                 <tbody>
                   ${itemsHtml}
                   <tr>
-                    <td colspan="2" style="padding: 10px 12px; color: #718096; font-weight: bold;">الشحن والتوصيل:</td>
-                    <td colspan="2" style="padding: 10px 12px; text-align: left; color: #10b981; font-weight: bold;">
+                    <td colspan="2" style="padding: 10px 12px; color: #718096; font-weight: bold;">مصاريف الشحن:</td>
+                    <td colspan="2" style="padding: 10px 12px; text-align: left; font-weight: bold; color: #10b981;">
                       ${order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`}
                     </td>
                   </tr>
                   <tr class="total-row">
-                    <td colspan="2" style="padding: 12px; font-weight: 800;">الإجمالي النهائي:</td>
-                    <td colspan="2" style="padding: 12px; text-align: left; font-weight: 800; color: #064e3b;">
+                    <td colspan="2" style="padding: 12px; font-weight: 800;">إجمالي الفاتورة المطلوب تحصيله:</td>
+                    <td colspan="2" style="padding: 12px; text-align: left; font-weight: 800;">
                       ${order.total} ج.م
                     </td>
                   </tr>
@@ -483,52 +551,44 @@ async function sendAdminOrderNotificationEmail(prisma, order) {
 
     const emailSubject = `طلب جديد #${order.orderNumber} - ${order.customerName} (${order.total} ج.م)`;
 
-    await sendViaResend({
-      apiKey,
-      fromEmail,
-      fromName,
+    const result = await dispatchEmail(prisma, {
       to: adminEmail,
       subject: emailSubject,
-      html: htmlContent
+      html: htmlContent,
+      context: 'Admin Notification'
     });
-    console.log(`Admin order notification email sent successfully via Resend to ${adminEmail}`);
+    console.log(`Admin order notification email sent successfully [${result.provider || 'email'}] to ${adminEmail}`);
     return true;
   } catch (err) {
-    console.error('Error sending admin order notification email via Resend:', err);
+    console.error(`Error sending admin order notification email to ${adminEmail}:`, err.message || err);
     return false;
   }
 }
 
 async function sendTestEmail(settings, toEmail) {
-  const apiKey = settings.resend_api_key || process.env.RESEND_API_KEY || '';
-  const fromEmail = settings.from_email || 'orders@the-vitahub.com';
-  const fromName = settings.from_name || 'The VitaHub';
+  const fromName = settings?.from_name || 'The VitaHub';
+  const fromEmail = settings?.from_email || 'orders@the-vitahub.com';
 
-  if (!apiKey) {
-    throw new Error('مفتاح API الخاص بـ Resend غير مدخل.');
-  }
-
-  const subject = 'رسالة تجريبية من لوحة تحكم The VitaHub عبر منصة Resend';
+  const subject = 'رسالة تجريبية من لوحة تحكم The VitaHub';
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; text-align: right; direction: rtl;">
-      <h2 style="color: #10b981; text-align: center;">اتصال Resend ناجح</h2>
+      <h2 style="color: #10b981; text-align: center;">اتصال البريد الإلكتروني ناجح</h2>
       <p style="font-size: 14px; color: #4a5568; line-height: 1.6;">
-        مرحباً، هذه رسالة تجريبية تم إرسالها من متجر <strong>The VitaHub</strong> عبر منصة <strong>Resend</strong> الرسمية للتأكد من نجاح ربط مفتاح الـ API وصلاحية الإرسال.
+        مرحباً، هذه رسالة تجريبية تم إرسالها من متجر <strong>The VitaHub</strong> للتأكد من نجاح ربط وسيلة إرسال البريد الإلكتروني وصلاحية الإرسال للمستلمين.
       </p>
       <hr style="border: 0; border-top: 1px solid #edf2f7; margin: 20px 0;" />
       <div style="font-size: 12px; color: #a0aec0; text-align: center;" dir="ltr">
-        Sender: ${fromName} &lt;${fromEmail}&gt; • Provider: Resend Cloud
+        Sender: ${fromName} &lt;${fromEmail}&gt;
       </div>
     </div>
   `;
 
-  return await sendViaResend({
-    apiKey,
-    fromEmail,
-    fromName,
+  return await dispatchEmail(null, {
     to: toEmail,
     subject,
-    html
+    html,
+    settingsOverride: settings,
+    context: 'Test Email'
   });
 }
 

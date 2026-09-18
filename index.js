@@ -438,10 +438,17 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// HTTPS Enforcement in production
+// HTTPS Enforcement in production (bypassed for internal Docker container traffic)
 if (process.env.NODE_ENV === 'production' && process.env.ENFORCE_HTTPS !== 'false') {
   app.use((req, res, next) => {
-    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    const host = (req.headers.host || '').toLowerCase();
+    const isInternal =
+      host.includes(':5000') ||
+      host.includes('localhost') ||
+      host.includes('127.0.0.1') ||
+      !host.includes('.'); // Docker internal service names (e.g. ahmed-backand-rs5rcx) do not contain dots
+
+    if (isInternal || req.secure || req.headers['x-forwarded-proto'] === 'https') {
       return next();
     }
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
@@ -2251,7 +2258,10 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'البريد الإلكتروني للمستلم مطلوب' });
   try {
-    const keys = ['resend_api_key', 'from_email', 'from_name'];
+    const keys = [
+      'resend_api_key', 'from_email', 'from_name',
+      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass'
+    ];
     const settings = {};
     for (const key of keys) {
       let def = '';
@@ -2262,9 +2272,9 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
     }
     const { sendTestEmail } = require('./src/services/emailService');
     const result = await sendTestEmail(settings, to);
-    res.json({ message: 'تم إرسال البريد الإلكتروني بنجاح عبر منصة Resend', result });
+    res.json({ message: `تم إرسال البريد الإلكتروني بنجاح [${result.provider || 'email'}]`, result });
   } catch (error) {
-    console.error('Resend test email error:', error);
+    console.error('Test email error:', error);
     sendSafeError(res, error);
   }
 });
