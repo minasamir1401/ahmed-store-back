@@ -7,5 +7,13 @@ dev.db-journal
 .wwebjs_cache/
 uploads/
 *.log
-google-indexing-key.json  
+google-indexing-key.json
 .baileys_auth/
+# Backup data files — never commit to version control
+backup_data.json
+*.backup.json
+# Service account keys
+*.service-account.json
+create-service-account-*.json
+*.pem
+*.key.json

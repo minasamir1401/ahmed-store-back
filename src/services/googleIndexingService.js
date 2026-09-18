@@ -10,20 +10,18 @@ if (privateKey) {
 }
 
 if (!clientEmail || !privateKey) {
-  try {
-    let key;
-    if (process.env.GOOGLE_INDEXING_CREDENTIALS) {
-      key = JSON.parse(process.env.GOOGLE_INDEXING_CREDENTIALS);
-    } else {
-      key = require('../../google-indexing-key.json');
-    }
-    if (key) {
-      clientEmail = clientEmail || key.client_email;
-      privateKey = privateKey || key.private_key;
-    }
-  } catch (err) {
-    if (!clientEmail || !privateKey) {
-      console.error('[Google Indexing API] Could not load credentials:', err.message);
+  if (process.env.GOOGLE_INDEXING_CREDENTIALS) {
+    try {
+      const key = JSON.parse(process.env.GOOGLE_INDEXING_CREDENTIALS);
+      if (key) {
+        clientEmail = clientEmail || key.client_email;
+        privateKey = privateKey || key.private_key;
+        if (privateKey) {
+          privateKey = privateKey.trim().replace(/^["']/, '').replace(/["']$/, '').replace(/\\n/g, '\n');
+        }
+      }
+    } catch (err) {
+      console.error('[Google Indexing API] Failed to parse GOOGLE_INDEXING_CREDENTIALS JSON:', err.message);
     }
   }
 }

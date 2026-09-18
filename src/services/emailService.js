@@ -32,7 +32,10 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html })
     return data;
   } catch (sdkError) {
     const isDomainPending = sdkError.message && sdkError.message.includes('domain is not verified');
-    const isOwnerRecipient = recipients.some(r => String(r).toLowerCase().includes('mina15g4y@gmail.com'));
+    const isOwnerRecipient = recipients.some(r => {
+      const lower = String(r).toLowerCase();
+      return lower.includes('the.vitaminshub@gmail.com') || lower.includes('mina15g4y@gmail.com');
+    });
 
     if (isDomainPending && isOwnerRecipient && !from.includes('onboarding@resend.dev')) {
       console.warn('Custom domain is pending Resend verification; using onboarding@resend.dev bridge for owner recipient...');
@@ -312,6 +315,190 @@ async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
   }
 }
 
+async function sendAdminOrderNotificationEmail(prisma, order) {
+  try {
+    const adminEmail = await getSetting(prisma, 'admin_notification_email', process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com');
+    if (!adminEmail || !adminEmail.includes('@')) {
+      console.log('Skipping admin order notification email: Invalid admin email');
+      return false;
+    }
+
+    const apiKey = process.env.RESEND_API_KEY || (await getSetting(prisma, 'resend_api_key', ''));
+    if (!apiKey) {
+      console.warn('Skipping admin order notification email: RESEND_API_KEY is not configured');
+      return false;
+    }
+
+    const fromEmail = await getSetting(prisma, 'from_email', 'orders@the-vitahub.com');
+    const fromName = await getSetting(prisma, 'from_name', 'The VitaHub Orders');
+    const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
+
+    const orderDateFormatted = new Date(order.createdAt || Date.now()).toLocaleDateString('ar-EG', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    const paymentMethodMap = {
+      cash: 'الدفع عند الاستلام (COD)',
+      instapay: 'إنستاباي (InstaPay)',
+      wallet: 'محفظة إلكترونية (فودافون كاش / أورنج / اتصالات)',
+      card: 'بطاقة بنكية'
+    };
+    const paymentMethodText = paymentMethodMap[order.paymentMethod] || order.paymentMethod || 'الدفع عند الاستلام';
+
+    const itemsHtml = (order.items || []).map(item => `
+      <tr>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #edf2f7; font-weight: bold; color: #2d3748; text-align: right;">
+          ${item.title}
+        </td>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #edf2f7; text-align: center; color: #4a5568;">
+          ${item.quantity}
+        </td>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #edf2f7; text-align: left; font-weight: bold; color: #10b981;">
+          ${item.price} ج.م
+        </td>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #edf2f7; text-align: left; font-weight: bold; color: #10b981;">
+          ${item.price * item.quantity} ج.م
+        </td>
+      </tr>
+    `).join('');
+
+    const customerEmailDisplay = order.customerEmail && order.customerEmail.includes('@')
+      ? `<a href="mailto:${order.customerEmail}" style="color: #10b981; text-decoration: none;">${order.customerEmail}</a>`
+      : '<span style="color: #a0aec0; font-style: italic;">غير مسجل بإيميل (مسجل برقم الهاتف)</span>';
+
+    const customerPhoneClean = String(order.customerPhone || '').replace(/\D/g, '');
+    const waLink = customerPhoneClean ? `https://wa.me/${customerPhoneClean.startsWith('2') ? customerPhoneClean : '2' + customerPhoneClean}` : '';
+
+    const addressParts = [
+      order.governorate,
+      order.district,
+      order.address,
+      order.building ? `عمارة: ${order.building}` : '',
+      order.floor ? `دور: ${order.floor}` : '',
+      order.apartment ? `شقة: ${order.apartment}` : ''
+    ].filter(Boolean).join(' - ');
+
+    const notesHtml = order.notes ? `
+      <div style="margin-top: 15px; padding: 12px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 8px; font-size: 13px; color: #92400e; text-align: right;">
+        <strong>ملاحظات العميل:</strong> ${order.notes}
+      </div>
+    ` : '';
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html dir="rtl" lang="ar">
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f7fafc; margin: 0; padding: 0; }
+          .container { max-width: 650px; margin: 25px auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+          .header { background-color: #064e3b; color: #ffffff; padding: 25px 30px; text-align: center; }
+          .header h1 { margin: 0; font-size: 22px; font-weight: 800; }
+          .header p { margin: 6px 0 0 0; font-size: 13px; opacity: 0.9; }
+          .badge { display: inline-block; background-color: #10b981; color: #ffffff; padding: 4px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-top: 10px; }
+          .content { padding: 25px 30px; text-align: right; direction: rtl; }
+          .card { background-color: #f8fafc; border-radius: 12px; padding: 18px 20px; margin-bottom: 20px; border: 1px solid #edf2f7; }
+          .card-title { font-size: 14px; font-weight: bold; color: #064e3b; margin-bottom: 12px; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; }
+          .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; color: #4a5568; }
+          .label { font-weight: bold; color: #718096; min-width: 110px; }
+          .value { font-weight: bold; color: #1a202c; text-align: left; }
+          .table-container { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+          .table-header { background-color: #f8fafc; color: #718096; font-size: 11px; text-transform: uppercase; font-weight: 800; }
+          .table-header th { padding: 10px 12px; text-align: right; border-bottom: 2px solid #edf2f7; }
+          .total-row { font-size: 16px; font-weight: 800; color: #064e3b; background-color: #f0fdf4; }
+          .btn-container { text-align: center; margin: 25px 0 10px 0; }
+          .btn { display: inline-block; background-color: #064e3b; color: #ffffff; padding: 12px 28px; border-radius: 8px; font-weight: bold; text-decoration: none; font-size: 13px; }
+          .footer { background-color: #f8fafc; padding: 16px; text-align: center; font-size: 11px; color: #a0aec0; border-top: 1px solid #edf2f7; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>إشعار طلب جديد #${order.orderNumber}</h1>
+            <p>تم تسجيل طلب جديد على متجر The VitaHub</p>
+            <span class="badge">الإجمالي: ${order.total} ج.م</span>
+          </div>
+          <div class="content">
+            <div class="card">
+              <div class="card-title">بيانات العميل</div>
+              <div class="row"><span class="label">اسم العميل:</span><span class="value">${order.customerName}</span></div>
+              <div class="row">
+                <span class="label">رقم الهاتف:</span>
+                <span class="value">
+                  <a href="tel:${order.customerPhone}" style="color: #10b981; text-decoration: none;">${order.customerPhone}</a>
+                  ${waLink ? `&nbsp;|&nbsp;<a href="${waLink}" target="_blank" style="color: #25d366; text-decoration: none;">مراسلة واتساب</a>` : ''}
+                </span>
+              </div>
+              <div class="row"><span class="label">البريد الإلكتروني:</span><span class="value">${customerEmailDisplay}</span></div>
+              <div class="row"><span class="label">عنوان التوصيل:</span><span class="value">${addressParts}</span></div>
+              <div class="row"><span class="label">تاريخ الطلب:</span><span class="value">${orderDateFormatted}</span></div>
+              <div class="row"><span class="label">طريقة الدفع:</span><span class="value">${paymentMethodText}</span></div>
+              ${notesHtml}
+            </div>
+
+            <div class="card">
+              <div class="card-title">المنتجات المطلوبة</div>
+              <table class="table-container">
+                <thead>
+                  <tr class="table-header">
+                    <th>المنتج</th>
+                    <th style="text-align: center; width: 60px;">الكمية</th>
+                    <th style="text-align: left; width: 90px;">السعر</th>
+                    <th style="text-align: left; width: 100px;">الإجمالي</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${itemsHtml}
+                  <tr>
+                    <td colspan="2" style="padding: 10px 12px; color: #718096; font-weight: bold;">الشحن والتوصيل:</td>
+                    <td colspan="2" style="padding: 10px 12px; text-align: left; color: #10b981; font-weight: bold;">
+                      ${order.shippingFee === 0 ? 'مجاني' : `${order.shippingFee} ج.م`}
+                    </td>
+                  </tr>
+                  <tr class="total-row">
+                    <td colspan="2" style="padding: 12px; font-weight: 800;">الإجمالي النهائي:</td>
+                    <td colspan="2" style="padding: 12px; text-align: left; font-weight: 800; color: #064e3b;">
+                      ${order.total} ج.م
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="btn-container">
+              <a href="${siteUrl}/admin" class="btn" target="_blank">معاينة وإدارة الطلب في لوحة التحكم</a>
+            </div>
+          </div>
+          <div class="footer">
+            نظام إدارة متجر The VitaHub التلقائي • مرسل إلى ${adminEmail}
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const emailSubject = `طلب جديد #${order.orderNumber} - ${order.customerName} (${order.total} ج.م)`;
+
+    await sendViaResend({
+      apiKey,
+      fromEmail,
+      fromName,
+      to: adminEmail,
+      subject: emailSubject,
+      html: htmlContent
+    });
+    console.log(`Admin order notification email sent successfully via Resend to ${adminEmail}`);
+    return true;
+  } catch (err) {
+    console.error('Error sending admin order notification email via Resend:', err);
+    return false;
+  }
+}
+
 async function sendTestEmail(settings, toEmail) {
   const apiKey = settings.resend_api_key || process.env.RESEND_API_KEY || '';
   const fromEmail = settings.from_email || 'orders@the-vitahub.com';
@@ -347,5 +534,6 @@ async function sendTestEmail(settings, toEmail) {
 
 module.exports = {
   sendOrderConfirmationEmail,
+  sendAdminOrderNotificationEmail,
   sendTestEmail
 };

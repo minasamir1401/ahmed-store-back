@@ -14,7 +14,7 @@ const jwt = require('jsonwebtoken');
 const sharp = require('sharp');
 const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./src/services/whatsappService');
 const { notifyGoogleIndexing } = require('./src/services/googleIndexingService');
-const { sendOrderConfirmationEmail } = require('./src/services/emailService');
+const { sendOrderConfirmationEmail, sendAdminOrderNotificationEmail } = require('./src/services/emailService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -22,7 +22,7 @@ if (!JWT_SECRET) {
   throw new Error('JWT_SECRET must be configured');
 }
 if (JWT_SECRET.length < 32) {
-  console.warn('⚠️ WARNING: JWT_SECRET should be at least 32 characters for production security.');
+  console.warn('WARNING: JWT_SECRET should be at least 32 characters for production security.');
 }
 
 if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
@@ -97,6 +97,98 @@ const normalizeString = (value, maxLength = 1000) => {
   if (typeof value !== 'string') return '';
   return value.trim().slice(0, maxLength);
 };
+
+function validateStrongPassword(password) {
+  if (typeof password !== 'string') return false;
+  if (password.length < 10) return false;
+  const hasUpper = /[A-Z]/.test(password);
+  const hasLower = /[a-z]/.test(password);
+  const hasDigit = /[0-9]/.test(password);
+  const hasSpecial = /[^A-Za-z0-9]/.test(password);
+  return hasUpper && hasLower && hasDigit && hasSpecial;
+}
+
+function isSafeDomain(domain) {
+  if (!domain || typeof domain !== 'string') return false;
+  const d = domain.toLowerCase().trim();
+  if (['localhost', '127.0.0.1', '0.0.0.0'].includes(d)) return false;
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.)/.test(d)) return false;
+  if (!/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,24}$/.test(d)) return false;
+  return true;
+}
+
+function sanitizeSafeLink(link) {
+  if (!link || typeof link !== 'string') return '';
+  const trimmed = link.trim();
+  if (trimmed.startsWith('/') || trimmed.startsWith('#')) {
+    return trimmed.slice(0, 500);
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.toString().slice(0, 500);
+    }
+  } catch {}
+  return '';
+}
+
+function sendSafeError(res, error, defaultMessage = 'حدث خطأ غير متوقع في الخادم') {
+  console.error(defaultMessage, error);
+  const status = error && error.status ? error.status : 500;
+  const message = (status < 500 && error && error.message) ? error.message : defaultMessage;
+  return res.status(status).json({ error: message });
+}
+
+const revokedTokensCache = new Set();
+
+async function isTokenRevoked(tokenHash) {
+  if (revokedTokensCache.has(tokenHash)) return true;
+  try {
+    const record = await prisma.revokedToken.findUnique({
+      where: { tokenHash }
+    });
+    if (record) {
+      revokedTokensCache.add(tokenHash);
+      return true;
+    }
+  } catch (err) {
+    console.error('Error checking revoked token:', err.message);
+  }
+  return false;
+}
+
+async function revokeToken(token, exp) {
+  if (!token) return;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const expiresAt = exp ? new Date(exp * 1000) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+  revokedTokensCache.add(tokenHash);
+  try {
+    await prisma.revokedToken.upsert({
+      where: { tokenHash },
+      create: { tokenHash, expiresAt },
+      update: { expiresAt }
+    });
+  } catch (err) {
+    console.error('Failed to persist revoked token:', err.message);
+  }
+}
+
+async function logAudit(action, { userId = null, resource = null, details = null, ip = null } = {}) {
+  try {
+    const cleanIp = typeof ip === 'string' ? ip.slice(0, 45) : null;
+    await prisma.auditLog.create({
+      data: {
+        action: String(action).slice(0, 100),
+        userId: userId ? String(userId).slice(0, 100) : null,
+        resource: resource ? String(resource).slice(0, 100) : null,
+        details: typeof details === 'string' ? details.slice(0, 2000) : (details ? JSON.stringify(details).slice(0, 2000) : null),
+        ipAddress: cleanIp
+      }
+    });
+  } catch (err) {
+    console.error('AuditLog creation error:', err.message);
+  }
+}
 
 const slugifyFileName = (value, fallback = 'product-image') => {
   const ascii = normalizeString(value, 120)
@@ -213,9 +305,15 @@ const authenticate = asyncHandler(async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const revoked = await isTokenRevoked(tokenHash);
+    if (revoked) return res.status(401).json({ error: 'تم إلغاء صلاحية الجلسة، يرجى تسجيل الدخول مجدداً' });
+
     const user = await prisma.user.findUnique({ where: { id: decoded.id }, select: publicUserSelect });
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
-    req.user = user;
+    req.user = { ...user, exp: decoded.exp };
+    req.token = token;
+    req.tokenHash = tokenHash;
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
@@ -229,8 +327,16 @@ const optionalAuthenticate = asyncHandler(async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
-    const user = await prisma.user.findUnique({ where: { id: decoded.id }, select: publicUserSelect });
-    if (user) req.user = user;
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const revoked = await isTokenRevoked(tokenHash);
+    if (!revoked) {
+      const user = await prisma.user.findUnique({ where: { id: decoded.id }, select: publicUserSelect });
+      if (user) {
+        req.user = { ...user, exp: decoded.exp };
+        req.token = token;
+        req.tokenHash = tokenHash;
+      }
+    }
   } catch (err) {}
   next();
 });
@@ -251,19 +357,22 @@ prisma.$connect()
     try {
       const adminExists = await prisma.user.findFirst({ where: { role: 'admin' } });
       if (!adminExists) {
-        console.log('No admin user found. Creating default admin...');
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = await bcrypt.hash('admin123456', 12);
+        const initPassword = process.env.ADMIN_INIT_PASSWORD;
+        if (!initPassword || initPassword.length < 12) {
+          throw new Error('ADMIN_INIT_PASSWORD must be set in environment with at least 12 characters before first run.');
+        }
+        console.log('No admin user found. Creating default admin from ADMIN_INIT_PASSWORD...');
+        const hashedPassword = await bcrypt.hash(initPassword, 12);
         await prisma.user.create({
           data: {
-            email: 'admin@mithaly.com',
+            email: process.env.ADMIN_INIT_EMAIL || 'admin@the-vitahub.com',
             password: hashedPassword,
             name: 'المدير العام',
-            phone: '201000000000',
+            phone: process.env.ADMIN_INIT_PHONE || '201000000000',
             role: 'admin'
           }
         });
-        console.log('Default admin user created successfully');
+        console.log('Default admin user created. CHANGE PASSWORD IMMEDIATELY.');
       }
 
       const defaultSettings = [
@@ -271,7 +380,8 @@ prisma.$connect()
         { key: 'from_email', value: process.env.RESEND_FROM_EMAIL || 'orders@the-vitahub.com' },
         { key: 'from_name', value: 'The VitaHub' },
         { key: 'whatsapp_number', value: '01201450111' },
-        { key: 'receiving_number', value: '01009596452' }
+        { key: 'receiving_number', value: '01009596452' },
+        { key: 'admin_notification_email', value: process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com' }
       ];
 
       for (const setting of defaultSettings) {
@@ -300,7 +410,9 @@ const allowedOrigins = (process.env.CORS_ORIGINS || '')
 const corsOptions = {
   origin: (origin, callback) => {
     const origins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins;
-    if (!origin || origins.includes(origin) || /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+    const isLocalhost = /^https?:\/\/localhost(:\d+)?$/.test(origin);
+    const allowLocalhost = process.env.NODE_ENV !== 'production';
+    if (!origin || origins.includes(origin) || (allowLocalhost && isLocalhost)) {
       return callback(null, true);
     }
     callback(new Error('Not allowed by CORS'));
@@ -316,14 +428,45 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "https://images.unsplash.com"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https://images.unsplash.com", "https://res.cloudinary.com", "https://placehold.co"],
       connectSrc: ["'self'", "https://api.the-vitahub.com", "http://localhost:5000"]
     }
   },
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
+
+// HTTPS Enforcement in production
+if (process.env.NODE_ENV === 'production' && process.env.ENFORCE_HTTPS !== 'false') {
+  app.use((req, res, next) => {
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      return next();
+    }
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  });
+}
+
+// CSRF & Origin Verification on state-changing requests
+const csrfProtection = (req, res, next) => {
+  const method = req.method.toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return next();
+  if (req.path.startsWith('/api/webhook')) return next();
+
+  const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+  if (origin) {
+    const origins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins;
+    const isLocalhost = /^https?:\/\/localhost(:\d+)?$/.test(origin);
+    const allowLocalhost = process.env.NODE_ENV !== 'production';
+    if (!origins.includes(origin) && !(allowLocalhost && isLocalhost)) {
+      return res.status(403).json({ error: 'CSRF / Origin validation failed' });
+    }
+  }
+  next();
+};
+app.use(csrfProtection);
+
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -335,10 +478,26 @@ const authLimiter = rateLimit({
 
 const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 1000,
+  limit: 100,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'محاولات كثيرة، يرجى المحاولة لاحقاً' }
+});
+
+const ordersLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'عدد كبير من الطلبات، يرجى المحاولة لاحقاً' }
+});
+
+const pixelLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Rate limit exceeded' }
 });
 
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
@@ -779,7 +938,7 @@ async function queryAI(prompt, maxTokens = 2000, provider = 'openrouter') {
     const keysToTry = [];
     const envKey = process.env.APIFREE_API_KEY || '';
     if (envKey) keysToTry.push(envKey);
-    keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
+    if (keysToTry.length === 0) throw new Error('APIFREE_API_KEY is not configured');
     return await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
   } else {
     // OpenRouter
@@ -1020,8 +1179,7 @@ app.post('/api/admin/products/:id/generate-seo', adminAuthenticate, async (req, 
     const result = await generateAndSaveProductSEO(req.params.id, true, provider);
     res.json(result);
   } catch (error) {
-    console.error('Manual SEO Generation Error:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate SEO' });
+    sendSafeError(res, error, 'حدث خطأ أثناء إنشاء بيانات تحسين محركات البحث');
   }
 });
 
@@ -1033,7 +1191,7 @@ app.get('/api/admin/indexing/logs', adminAuthenticate, async (req, res) => {
     });
     res.json(logs);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1044,7 +1202,7 @@ app.post('/api/admin/indexing/submit', adminAuthenticate, async (req, res) => {
     const result = await notifyGoogleIndexing(url, type || 'URL_UPDATED');
     res.json({ success: true, result });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1197,7 +1355,7 @@ app.post('/api/ai/generate', adminAuthenticate, adminLimiter, async (req, res) =
       const keysToTry = [];
       const envKey = process.env.APIFREE_API_KEY || '';
       if (envKey) keysToTry.push(envKey);
-      keysToTry.push('apf_xsuukak3i8667v8bcj4sx4wf'); // Working fallback key
+      if (keysToTry.length === 0) throw new Error('APIFREE_API_KEY is not configured');
 
       const responseText = await fetchAPIFreeLLMWithRetry(prompt, keysToTry);
       return res.json({
@@ -1470,14 +1628,13 @@ app.post('/api/translate', adminAuthenticate, adminLimiter, async (req, res) => 
 
     res.json({ translation: translatedChunks.join('\n').trim() });
   } catch (error) {
-    console.error('Translation route error:', error);
-    res.status(502).json({ error: error.message });
+    sendSafeError(res, error, 'خدمة الترجمة غير متاحة حالياً');
   }
 });
 
 // ── Health Check ──────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ message: 'Mithaly Backend is running smoothly! 🚀' });
+  res.json({ message: 'Mithaly Backend is running smoothly' });
 });
 
 app.get('/api/auth/google-config', authLimiter, (req, res) => {
@@ -1485,11 +1642,10 @@ app.get('/api/auth/google-config', authLimiter, (req, res) => {
 });
 
 app.get('/api/auth/test-diagnostic', adminAuthenticate, (req, res) => {
-  res.json({
-    message: 'Diagnostic OK',
-    time: new Date(),
-    routes: app._router.stack.filter(r => r.route).map(r => `${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`)
-  });
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.json({ message: 'Diagnostic OK', time: new Date() });
 });
 
 
@@ -1514,8 +1670,11 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
   }
 
-  if (cleanPassword.length < 6) {
-    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 6 أحرف' });
+  if (cleanPassword.length < 8) {
+    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 8 أحرف' });
+  }
+  if (!/[a-zA-Z]/.test(cleanPassword) || !/[0-9]/.test(cleanPassword)) {
+    return res.status(400).json({ error: 'يجب أن تحتوي كلمة المرور على حروف وأرقام معاً' });
   }
 
   try {
@@ -1536,7 +1695,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, phone: user.phone } });
 
     // Send welcome message via WhatsApp asynchronously
-    const welcomeMessage = `مرحباً بك يا ${user.name} في The VitaHub! 🌟\nتم إنشاء حسابك بنجاح باستخدام هذا الرقم.\nيسعدنا انضمامك إلينا!`;
+    const welcomeMessage = `مرحباً بك يا ${user.name} في The VitaHub!\nتم إنشاء حسابك بنجاح باستخدام هذا الرقم.\nيسعدنا انضمامك إلينا!`;
     sendWhatsAppMessage(user.phone, welcomeMessage);
   } catch (error) {
     res.status(500).json({ error: 'فشل في إنشاء الحساب، يرجى المحاولة لاحقاً' });
@@ -1618,9 +1777,8 @@ app.post('/api/auth/google', authLimiter, async (req, res) => {
 
 // ── Admin Login Route ─────────────────────────────────────────
 app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
-  const { username, email, phone, password } = req.body;
+  const { username, email, phone, password, mfaCode } = req.body;
 
-  // username field can be either email, phone or name
   const rawIdentifier = username || email || phone || '';
   const cleanPassword = typeof password === 'string' ? password.trim() : '';
 
@@ -1636,8 +1794,7 @@ app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
         role: 'admin',
         OR: [
           { email: cleanIdentifier.toLowerCase() },
-          { phone: cleanIdentifier },
-          { name: cleanIdentifier }
+          { phone: cleanIdentifier }
         ]
       }
     });
@@ -1647,12 +1804,78 @@ app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
     const valid = await bcrypt.compare(cleanPassword, adminUser.password);
     if (!valid) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
 
-    // Admin sessions last 7 days
-    const token = signToken(adminUser, process.env.ADMIN_JWT_EXPIRES_IN || '7d');
+    // Multi-Factor Authentication (MFA) check if enabled
+    if (process.env.ADMIN_MFA_ENABLED === 'true') {
+      const cleanMfaCode = typeof mfaCode === 'string' ? mfaCode.trim() : '';
+      if (!cleanMfaCode) {
+        const generatedCode = String(crypto.randomInt(100000, 999999));
+        const salt = process.env.OTP_SECRET || 'vitahub-otp-salt';
+        const hashedCode = crypto.createHmac('sha256', salt).update(generatedCode).digest('hex');
+        await prisma.user.update({
+          where: { id: adminUser.id },
+          data: {
+            resetOtpCode: hashedCode,
+            resetOtpExpires: new Date(Date.now() + 5 * 60 * 1000)
+          }
+        });
+        if (adminUser.phone) {
+          sendWhatsAppMessage(adminUser.phone, `رمز الدخول المزدوج (MFA) للوحة التحكم هو: ${generatedCode} (صالح لمدة 5 دقائق)`);
+        }
+        return res.json({ mfaRequired: true, message: 'رمز التحقق المزدوج (MFA) تم إرساله، يرجى إدخاله لإكمال تسجيل الدخول' });
+      }
+
+      const salt = process.env.OTP_SECRET || 'vitahub-otp-salt';
+      const providedHash = crypto.createHmac('sha256', salt).update(cleanMfaCode).digest('hex');
+      if (!adminUser.resetOtpCode || adminUser.resetOtpCode !== providedHash || !adminUser.resetOtpExpires || new Date() > adminUser.resetOtpExpires) {
+        return res.status(400).json({ error: 'رمز التحقق المزدوج غير صحيح أو منتهي الصلاحية' });
+      }
+
+      await prisma.user.update({
+        where: { id: adminUser.id },
+        data: { resetOtpCode: null, resetOtpExpires: null }
+      });
+    }
+
+    // Admin sessions: 4 hours max (security constraint)
+    const token = signToken(adminUser, process.env.ADMIN_JWT_EXPIRES_IN || '4h');
+    await logAudit('ADMIN_LOGIN', {
+      userId: adminUser.id,
+      resource: 'Auth',
+      details: 'Admin logged in successfully',
+      ip: req.ip
+    });
+
     res.json({ token, user: { id: adminUser.id, email: adminUser.email, name: adminUser.name || 'المدير العام', role: 'admin' } });
   } catch (error) {
-    console.error('Admin login error:', error);
-    res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الدخول' });
+    sendSafeError(res, error, 'حدث خطأ أثناء تسجيل الدخول');
+  }
+});
+
+app.post('/api/auth/logout', authenticate, async (req, res) => {
+  try {
+    if (req.token) {
+      await revokeToken(req.token, req.user?.exp);
+    }
+    res.json({ success: true, message: 'تم تسجيل الخروج بنجاح' });
+  } catch (error) {
+    sendSafeError(res, error, 'حدث خطأ أثناء تسجيل الخروج');
+  }
+});
+
+app.post('/api/auth/admin-logout', adminAuthenticate, async (req, res) => {
+  try {
+    if (req.token) {
+      await revokeToken(req.token, req.user?.exp);
+      await logAudit('ADMIN_LOGOUT', {
+        userId: req.user.id,
+        resource: 'Auth',
+        details: 'Admin logged out',
+        ip: req.ip
+      });
+    }
+    res.json({ success: true, message: 'تم تسجيل الخروج بنجاح' });
+  } catch (error) {
+    sendSafeError(res, error, 'حدث خطأ أثناء تسجيل الخروج');
   }
 });
 
@@ -1663,7 +1886,7 @@ app.get('/api/cart', authenticate, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
     res.json({ cart: user.cart ? JSON.parse(user.cart) : [] });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء جلب السلة');
   }
 });
 
@@ -1676,36 +1899,62 @@ app.post('/api/cart', authenticate, async (req, res) => {
     const safeCart = Array.isArray(cart) ? cart.slice(0, 50).map(item => ({
       id: String(item.id || '').slice(0, 120),
       title: normalizeString(item.title, 500),
-      price: Number.isFinite(Number(item.price)) ? Number(item.price) : 0,
       quantity: Math.min(Math.max(Number.parseInt(item.quantity, 10) || 1, 1), 20),
-      image: normalizeString(item.image, 1000),
       size: item.size ? normalizeString(item.size, 120) : undefined
     })).filter(item => item.id) : [];
-    const cartString = JSON.stringify(safeCart);
+
+    // Recalculate price strictly from DB to prevent client-side cart tampering
+    const productIds = safeCart.map(i => i.id);
+    const dbProducts = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, title: true, price: true, image: true, sizeOptions: true }
+    });
+    const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
+
+    const verifiedCart = safeCart.map(item => {
+      const dbProd = dbProductMap.get(item.id);
+      if (!dbProd) return null;
+      let price = Number(dbProd.price);
+      if (item.size && dbProd.sizeOptions) {
+        try {
+          const options = JSON.parse(dbProd.sizeOptions);
+          const selected = Array.isArray(options) ? options.find(o => String(o.size) === item.size) : null;
+          if (selected && Number.isFinite(Number(selected.price))) {
+            price = Number(selected.price);
+          }
+        } catch (e) {}
+      }
+      return {
+        id: dbProd.id,
+        title: dbProd.title,
+        price,
+        quantity: item.quantity,
+        image: dbProd.image || null,
+        size: item.size
+      };
+    }).filter(Boolean);
+
+    const cartString = JSON.stringify(verifiedCart);
     await prisma.user.update({
       where: { id: req.user.id },
       data: { cart: cartString }
     });
-    res.json({ success: true });
+    res.json({ success: true, cart: verifiedCart });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء حفظ السلة');
   }
 });
-
-
-
 
 // ── Admin Profile Endpoints ──────────────────
 app.get('/api/admin/profile', adminAuthenticate, async (req, res) => {
   try {
     const adminUser = await prisma.user.findUnique({ where: { id: req.user.id } });
-
     if (adminUser) {
       return res.json({ email: adminUser.email, name: adminUser.name });
     }
     return res.status(404).json({ error: 'المشرف غير موجود' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء جلب بيانات المشرف');
   }
 });
 
@@ -1718,9 +1967,25 @@ app.post('/api/admin/update-profile', adminAuthenticate, async (req, res) => {
     const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const cleanName = typeof name === 'string' ? name.trim().slice(0, 120) : '';
     const cleanPassword = typeof password === 'string' ? password.trim() : '';
-    // Allow any string to be used as username/email for the admin
-    // if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
-    if (cleanPassword && cleanPassword.length < 8) return res.status(400).json({ error: 'كلمة المرور يجب ألا تقل عن 8 أحرف' });
+
+    if (cleanEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        return res.status(400).json({ error: 'صيغة البريد الإلكتروني غير صالحة' });
+      }
+      if (cleanEmail !== adminUser.email) {
+        const existing = await prisma.user.findUnique({ where: { email: cleanEmail } });
+        if (existing) {
+          return res.status(400).json({ error: 'البريد الإلكتروني مستخدم بالفعل' });
+        }
+      }
+    }
+
+    if (cleanPassword) {
+      if (!validateStrongPassword(cleanPassword)) {
+        return res.status(400).json({ error: 'كلمة المرور يجب أن تتكون من 10 خانات على الأقل، وتحتوي على أحرف كبيرة وصغيرة وأرقام ورموز خاصة' });
+      }
+    }
 
     const hashedPassword = cleanPassword ? await bcrypt.hash(cleanPassword, 12) : undefined;
 
@@ -1732,10 +1997,17 @@ app.post('/api/admin/update-profile', adminAuthenticate, async (req, res) => {
         name: cleanName || undefined
       }
     });
+
+    await logAudit('ADMIN_UPDATE_PROFILE', {
+      userId: adminUser.id,
+      resource: 'User',
+      details: JSON.stringify({ emailChanged: Boolean(cleanEmail && cleanEmail !== adminUser.email), nameChanged: Boolean(cleanName && cleanName !== adminUser.name), passwordChanged: Boolean(cleanPassword) }),
+      ip: req.ip
+    });
+
     return res.json({ success: true, user: { id: updated.id, email: updated.email, name: updated.name } });
   } catch (error) {
-    console.error('Update admin profile error:', error);
-    res.status(500).json({ error: 'حدث خطأ أثناء تحديث بيانات المشرف' });
+    sendSafeError(res, error, 'حدث خطأ أثناء تحديث بيانات المشرف');
   }
 });
 
@@ -1745,7 +2017,7 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
     res.json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء جلب بيانات المستخدم');
   }
 });
 
@@ -1775,7 +2047,7 @@ app.get('/api/settings', async (req, res) => {
     const return_policy = await getSetting(prisma, 'return_policy', '');
     res.json({ whatsapp_number, receiving_number, shipping_rates, return_policy });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1794,29 +2066,52 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
     if (!settings.from_name) settings.from_name = 'The VitaHub';
     if (!settings.whatsapp_number) settings.whatsapp_number = '01201450111';
     if (!settings.receiving_number) settings.receiving_number = '01009596452';
+    if (!settings.admin_notification_email) settings.admin_notification_email = process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com';
+
+    // Mask sensitive keys — show only last 4 chars
+    const SENSITIVE_KEYS = ['resend_api_key', 'smtp_pass'];
+    for (const key of SENSITIVE_KEYS) {
+      if (settings[key] && settings[key].length > 4) {
+        settings[key] = `***${settings[key].slice(-4)}`;
+      } else if (settings[key]) {
+        settings[key] = '***';
+      }
+    }
 
     res.json(settings);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('GET /api/admin/settings error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء جلب الإعدادات' });
   }
 });
+
+const ALLOWED_SETTINGS_KEYS = new Set([
+  'resend_api_key', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass',
+  'from_email', 'from_name', 'whatsapp_number', 'receiving_number',
+  'shipping_rates', 'return_policy', 'admin_notification_email'
+]);
 
 app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
   const data = req.body;
   try {
-    for (const [key, value] of Object.entries(data)) {
+    const entries = Object.entries(data).filter(([key]) => ALLOWED_SETTINGS_KEYS.has(key));
+    if (entries.length === 0) {
+      return res.status(400).json({ error: 'لا توجد مفاتيح صالحة للحفظ' });
+    }
+    for (const [key, value] of entries) {
       if (value !== undefined && value !== null) {
-        await setSetting(prisma, key, String(value));
+        await setSetting(prisma, key, String(value).slice(0, 2000));
       }
     }
     res.json({ message: 'تم حفظ الإعدادات بنجاح' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('POST /api/admin/settings error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء حفظ الإعدادات' });
   }
 });
 
 // ── Pixel & Analytics Endpoints ──────────────────
-app.post('/api/pixel-events', async (req, res) => {
+app.post('/api/pixel-events', pixelLimiter, async (req, res) => {
   try {
     const { eventName, url, metadata, eventId, fbp, fbc } = req.body || {};
     if (!eventName) {
@@ -1846,7 +2141,7 @@ app.post('/api/pixel-events', async (req, res) => {
 
     res.status(201).json({ success: true, id: event.id });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1901,7 +2196,7 @@ app.get('/api/admin/pixel-stats', adminAuthenticate, async (req, res) => {
       chartData: Array.from(dayMap.values())
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1948,7 +2243,7 @@ app.get('/api/admin/pixel-events', adminAuthenticate, async (req, res) => {
 
     res.json({ events: formattedEvents, total });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -1970,11 +2265,14 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
     res.json({ message: 'تم إرسال البريد الإلكتروني بنجاح عبر منصة Resend', result });
   } catch (error) {
     console.error('Resend test email error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
 // ── WhatsApp and Forgot Password Endpoints ──────────────────
+// Dedicated OTP secret — separate from JWT_SECRET
+const OTP_SECRET = process.env.OTP_SECRET || process.env.JWT_SECRET;
+
 app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const { phone } = req.body;
   const cleanPhone = phone ? phone.trim() : '';
@@ -1992,13 +2290,15 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
     if (!user) return res.json(genericResponse);
 
     const otpCode = crypto.randomInt(100000, 1000000).toString();
-    const otpHash = crypto.createHash('sha256').update(`${otpCode}:${JWT_SECRET}`).digest('hex');
+    const otpSalt = crypto.randomBytes(16).toString('hex');
+    const otpHash = crypto.createHash('sha256').update(`${otpCode}:${otpSalt}:${OTP_SECRET}`).digest('hex');
     const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
 
+    // Store hash:salt together so reset can verify
     await prisma.user.update({
       where: { id: user.id },
       data: {
-        resetOtpCode: otpHash,
+        resetOtpCode: `${otpHash}:${otpSalt}`,
         resetOtpExpires: otpExpires
       }
     });
@@ -2027,8 +2327,11 @@ app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
   }
 
-  if (cleanPassword.length < 6) {
-    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 6 أحرف' });
+  if (cleanPassword.length < 8) {
+    return res.status(400).json({ error: 'يجب ألا تقل كلمة المرور عن 8 أحرف' });
+  }
+  if (!/[a-zA-Z]/.test(cleanPassword) || !/[0-9]/.test(cleanPassword)) {
+    return res.status(400).json({ error: 'يجب أن تحتوي كلمة المرور على حروف وأرقام معاً' });
   }
 
   try {
@@ -2038,8 +2341,11 @@ app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
 
     if (!user) return res.status(400).json({ error: 'بيانات التحقق غير صحيحة' });
 
-    const submittedHash = crypto.createHash('sha256').update(`${cleanCode}:${JWT_SECRET}`).digest('hex');
-    if (!user.resetOtpCode || user.resetOtpCode !== submittedHash) {
+    const [storedHash, storedSalt] = (user.resetOtpCode || '').split(':');
+    const submittedHash = storedSalt
+      ? crypto.createHash('sha256').update(`${cleanCode}:${storedSalt}:${OTP_SECRET}`).digest('hex')
+      : '';
+    if (!storedHash || submittedHash !== storedHash) {
       return res.status(400).json({ error: 'رمز التحقق غير صحيح' });
     }
 
@@ -2073,7 +2379,7 @@ app.post('/api/whatsapp/logout', adminAuthenticate, async (req, res) => {
     await logoutWhatsApp();
     res.json({ success: true, message: 'تم تسجيل الخروج من واتساب بنجاح ويجري إعادة التهيئة' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2087,7 +2393,7 @@ app.get('/api/brands', async (req, res) => {
     });
     res.json(brands);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2104,7 +2410,7 @@ app.post('/api/brands', adminAuthenticate, async (req, res) => {
     res.status(201).json(brand);
   } catch (error) {
     console.error('POST /api/brands error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2139,13 +2445,13 @@ Answer with ONLY the domain name, nothing else. Do not write introductory text, 
       const matches = cleaned.match(domainRegex);
       if (matches && matches.length > 0) {
         for (const match of matches) {
-          if (match !== 'notfound' && !match.includes('openrouter') && !match.includes('llama') && !match.includes('gemini') && match.length >= 4) {
+          if (match !== 'notfound' && !match.includes('openrouter') && !match.includes('llama') && !match.includes('gemini') && match.length >= 4 && isSafeDomain(match)) {
             return match;
           }
         }
       }
       cleaned = cleaned.replace(/[^a-z0-9.\-]/g, '');
-      if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.')) {
+      if (cleaned && cleaned !== 'notfound' && cleaned.length >= 4 && cleaned.includes('.') && isSafeDomain(cleaned)) {
         return cleaned;
       }
       return '';
@@ -2170,7 +2476,7 @@ Answer with ONLY the domain name, nothing else. Do not write introductory text, 
           const data = await response.json();
           const text = data.choices?.[0]?.message?.content || '';
           const cleaned = extractDomain(text);
-          if (cleaned) {
+          if (cleaned && isSafeDomain(cleaned)) {
             domain = cleaned;
             success = true;
             break;
@@ -2185,7 +2491,7 @@ Answer with ONLY the domain name, nothing else. Do not write introductory text, 
       }
     }
 
-    if (!success || !domain) {
+    if (!success || !domain || !isSafeDomain(domain)) {
       return res.status(404).json({ error: 'لم يتم العثور على موقع رسمي للماركة' });
     }
 
@@ -2206,8 +2512,7 @@ Answer with ONLY the domain name, nothing else. Do not write introductory text, 
 
     res.json({ domain, logoUrl: finalLogo });
   } catch (error) {
-    console.error('Error auto-finding brand logo:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء البحث عن شعار الماركة');
   }
 });
 
@@ -2313,7 +2618,7 @@ Answer with ONLY the domain name, nothing else. Do not write introductory text, 
     res.json({ message: `Successfully updated ${updatedCount} brand logos.`, updatedCount });
   } catch (error) {
     console.error('Error auto-finding all brand logos:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2341,7 +2646,7 @@ app.get('/api/brands/:id', async (req, res) => {
     if (!brand) return res.status(404).json({ error: 'Not found' });
     res.json({ ...brand, totalProducts: brand._count.products, page, limit });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2360,7 +2665,7 @@ app.patch('/api/brands/:id', adminAuthenticate, async (req, res) => {
     res.json(brand);
   } catch (error) {
     console.error('PATCH /api/brands/:id error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2369,7 +2674,7 @@ app.delete('/api/brands/:id', adminAuthenticate, async (req, res) => {
     await prisma.brand.delete({ where: { id: req.params.id } });
     res.json({ message: 'Deleted' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2407,9 +2712,28 @@ app.get('/api/products', async (req, res) => {
     if (req.query.sortBy === 'price-asc') orderBy = { price: 'asc' };
     if (req.query.sortBy === 'price-desc') orderBy = { price: 'desc' };
 
-    const include = {
-      category: { select: { id: true, name: true, image: true } },
-      brand: { select: { id: true, name: true, image: true } }
+    const isFull = req.query.full === 'true';
+    const cardSelect = {
+      id: true,
+      title: true,
+      titleEn: true,
+      price: true,
+      oldPrice: true,
+      discountType: true,
+      discountValue: true,
+      image: true,
+      images: true,
+      imageAlt: true,
+      imageWidth: true,
+      imageHeight: true,
+      sizes: true,
+      tag: true,
+      categoryId: true,
+      brandId: true,
+      createdAt: true,
+      updatedAt: true,
+      category: { select: { id: true, name: true, nameEn: true, image: true } },
+      brand: { select: { id: true, name: true, nameEn: true, image: true } }
     };
 
     const maxPriceAggregate = await prisma.product.aggregate({
@@ -2417,15 +2741,31 @@ app.get('/api/products', async (req, res) => {
     });
     const maxProductPrice = maxPriceAggregate._max.price || 5000;
 
+    const findArgs = {
+      where,
+      skip,
+      take,
+      orderBy,
+      ...(isFull
+        ? {
+            include: {
+              category: { select: { id: true, name: true, image: true } },
+              brand: { select: { id: true, name: true, image: true } }
+            }
+          }
+        : { select: cardSelect }
+      )
+    };
+
     const [products, total] = await prisma.$transaction([
-      prisma.product.findMany({ where, skip, take, include, orderBy }),
+      prisma.product.findMany(findArgs),
       prisma.product.count({ where })
     ]);
 
     if (isLegacyList) return res.json(products);
     res.json({ items: products, total, page, limit: take, maxPrice: maxProductPrice });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2450,7 +2790,7 @@ app.get('/api/products/:id', async (req, res) => {
       imageHeight: product.imageHeight || imageMeta?.height
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2491,7 +2831,7 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
     res.status(201).json(product);
   } catch (error) {
     console.error('POST /api/products error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2562,7 +2902,7 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
     res.json(product);
   } catch (error) {
     console.error('PATCH /api/products error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2581,7 +2921,7 @@ app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
     res.json({ message: 'Product deleted' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2605,7 +2945,7 @@ app.get('/api/categories', async (req, res) => {
     res.json(formatted);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2618,7 +2958,7 @@ app.post('/api/categories', adminAuthenticate, async (req, res) => {
     res.status(201).json(category);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2632,7 +2972,7 @@ app.patch('/api/categories/:id', adminAuthenticate, async (req, res) => {
     res.json(category);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2642,7 +2982,7 @@ app.delete('/api/categories/:id', adminAuthenticate, async (req, res) => {
     res.json({ message: 'Category deleted' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2653,7 +2993,7 @@ app.get('/api/offers', async (req, res) => {
     res.json(offers);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2669,7 +3009,7 @@ app.post('/api/offers', adminAuthenticate, async (req, res) => {
     res.status(201).json(offer);
   } catch (error) {
     console.error('Error creating offer:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2683,7 +3023,7 @@ app.patch('/api/offers/:id', adminAuthenticate, async (req, res) => {
     res.json(offer);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2693,7 +3033,7 @@ app.delete('/api/offers/:id', adminAuthenticate, async (req, res) => {
     res.json({ message: 'Offer deleted' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2704,7 +3044,7 @@ app.get('/api/blog', async (req, res) => {
     res.json(posts);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2718,7 +3058,7 @@ app.patch('/api/blog/:id', adminAuthenticate, async (req, res) => {
     res.json(post);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2728,25 +3068,12 @@ app.delete('/api/blog/:id', adminAuthenticate, async (req, res) => {
     res.json({ message: 'Post deleted' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
-// ── Translation Route ─────────────────────────────────────────
-app.post('/api/translate', adminAuthenticate, async (req, res) => {
-  const { text, from = 'ar', to = 'en' } = req.body;
-  if (!text) return res.status(400).json({ error: 'Text is required' });
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
-    const translateRes = await fetch(url);
-    const data = await translateRes.json();
-    const translatedText = data[0].map((x) => x[0]).join('');
-    res.json({ text: translatedText });
-  } catch (error) {
-    console.error('Translation error:', error);
-    res.status(500).json({ error: error.message || 'Translation failed' });
-  }
-});
+// ── Translation Route — single route with chunking (defined above near L1462)
+// The duplicate simpler version has been removed.
 
 // ── Medical Tips Routes ───────────────────────────────────────
 app.get('/api/medical-tips', async (req, res) => {
@@ -2755,8 +3082,8 @@ app.get('/api/medical-tips', async (req, res) => {
     const tips = await prisma.medicalTip.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(tips);
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('GET /api/medical-tips error:', error);
+    res.status(500).json({ error: 'حدث خطأ أثناء جلب النصائح الطبية' });
   }
 });
 
@@ -2768,7 +3095,7 @@ app.get('/api/medical-tips/:id', async (req, res) => {
     res.json(tip);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2781,7 +3108,7 @@ app.post('/api/medical-tips', adminAuthenticate, async (req, res) => {
     res.json(tip);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2795,7 +3122,7 @@ app.patch('/api/medical-tips/:id', adminAuthenticate, async (req, res) => {
     res.json(tip);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2805,7 +3132,7 @@ app.delete('/api/medical-tips/:id', adminAuthenticate, async (req, res) => {
     res.json({ message: 'Tip deleted' });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2819,7 +3146,7 @@ app.get('/api/hero', async (req, res) => {
     res.json(hero);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2832,15 +3159,27 @@ app.patch('/api/hero', adminAuthenticate, async (req, res) => {
       'prod4Id', 'prod4Image', 'prod4Type', 'slides'
     ];
     const data = pick(req.body, allowedHeroFields);
+
+    if (data.buttonLink !== undefined) data.buttonLink = sanitizeSafeLink(data.buttonLink);
+    if (data.side1Link !== undefined) data.side1Link = sanitizeSafeLink(data.side1Link);
+    if (data.side2Link !== undefined) data.side2Link = sanitizeSafeLink(data.side2Link);
+
     const hero = await prisma.hero.upsert({
       where: { id: 'hero-section' },
       update: data,
       create: { id: 'hero-section', ...data }
     });
+
+    await logAudit('HERO_UPDATE', {
+      userId: req.user.id,
+      resource: 'Hero',
+      details: 'Hero section configuration updated',
+      ip: req.ip
+    });
+
     res.json(hero);
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء تحديث قسم الواجهة');
   }
 });
 
@@ -2864,7 +3203,7 @@ app.get('/api/orders', adminAuthenticate, async (req, res) => {
     if (!req.query.page && !req.query.limit) return res.json(orders);
     return res.json({ items: orders, total, page, limit });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -2875,10 +3214,8 @@ app.get('/api/orders/track/:orderNumber', async (req, res) => {
     if (!phone) return res.status(400).json({ error: 'رقم الهاتف مطلوب لتتبع الطلب' });
     const orders = await prisma.order.findMany({
       where: { 
-        orderNumber, 
-        customerPhone: {
-          contains: phone
-        }
+        orderNumber,
+        customerPhone: phone
       },
       include: { items: true },
       take: 1
@@ -2903,11 +3240,11 @@ app.get('/api/orders/track/:orderNumber', async (req, res) => {
       items: order.items
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
-app.post('/api/orders', optionalAuthenticate, async (req, res) => {
+app.post('/api/orders', ordersLimiter, optionalAuthenticate, async (req, res) => {
   const { 
     customerName, customerEmail, customerPhone, governorate, district, 
     address, building, floor, apartment, notes, paymentMethod, items,
@@ -3016,7 +3353,7 @@ app.post('/api/orders', optionalAuthenticate, async (req, res) => {
     const orderMessage = orderLanguage === 'en'
       ? `Hello ${order.customerName},
 
-Your order has been successfully placed at The VitaHub! 🎉
+Your order has been successfully placed at The VitaHub.
 
 Order details #${order.orderNumber}:
 ${itemsListText}
@@ -3026,10 +3363,10 @@ Total Price: ${order.total} EGP
 Payment Method: ${paymentMethodText}
 
 Website Link: ${siteUrl}
-Thank you for shopping with us! ❤️`
+Thank you for shopping with us.`
       : `مرحباً ${order.customerName}،
 
-تم استلام طلبك بنجاح في متجر The VitaHub! 🎉
+تم استلام طلبك بنجاح في متجر The VitaHub.
 
 تفاصيل طلبك رقم #${order.orderNumber}:
 ${itemsListText}
@@ -3039,9 +3376,12 @@ ${itemsListText}
 طريقة الدفع: ${paymentMethodText}
 
 رابط الموقع: ${siteUrl}
-شكراً لتسوقك معنا! ❤️`;
+شكراً لتسوقك معنا.`;
 
     sendWhatsAppMessage(order.customerPhone, orderMessage);
+
+    // Send admin notification email immediately for every order
+    sendAdminOrderNotificationEmail(prisma, order);
 
     // Send order confirmation email asynchronously if customer email is provided
     if (order.customerEmail) {
@@ -3049,7 +3389,9 @@ ${itemsListText}
     }
   } catch (error) {
     console.error('POST /api/orders error:', error);
-    res.status(500).json({ error: error.message });
+    const status = error.status || 500;
+    const message = status < 500 ? error.message : 'حدث خطأ أثناء معالجة الطلب، يرجى المحاولة لاحقاً';
+    res.status(status).json({ error: message });
   }
 });
 
@@ -3067,7 +3409,7 @@ app.get('/api/my-orders', authenticate, async (req, res) => {
     });
     res.json(orders);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء جلب الطلبات');
   }
 });
 
@@ -3091,20 +3433,19 @@ app.delete('/api/my-orders/:id', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'لا يمكن إلغاء الطلب بعد شحنه أو توصيله' });
     }
 
-    // Delete items first (due to foreign key constraints in SQLite)
-    await prisma.orderItem.deleteMany({
-      where: { orderId: req.params.id }
-    });
-
-    // Delete the order
-    await prisma.order.delete({
-      where: { id: req.params.id }
+    // Wrap multi-table deletion in a transaction
+    await prisma.$transaction(async (tx) => {
+      await tx.orderItem.deleteMany({
+        where: { orderId: req.params.id }
+      });
+      await tx.order.delete({
+        where: { id: req.params.id }
+      });
     });
 
     res.json({ message: 'تم إلغاء الطلب وحذفه بنجاح' });
   } catch (error) {
-    console.error('DELETE /api/my-orders error:', error);
-    res.status(500).json({ error: 'حدث خطأ أثناء إلغاء الطلب' });
+    sendSafeError(res, error, 'حدث خطأ أثناء إلغاء الطلب');
   }
 });
 
@@ -3118,24 +3459,41 @@ app.patch('/api/orders/:id', adminAuthenticate, async (req, res) => {
       where: { id: req.params.id },
       data
     });
+
+    await logAudit('ORDER_STATUS_UPDATE', {
+      userId: req.user.id,
+      resource: 'Order',
+      details: JSON.stringify({ orderId: req.params.id, updates: data }),
+      ip: req.ip
+    });
+
     res.json(order);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء تحديث الطلب');
   }
 });
 
 app.delete('/api/orders/:id', adminAuthenticate, async (req, res) => {
   try {
-    await prisma.orderItem.deleteMany({
-      where: { orderId: req.params.id }
+    await prisma.$transaction(async (tx) => {
+      await tx.orderItem.deleteMany({
+        where: { orderId: req.params.id }
+      });
+      await tx.order.delete({
+        where: { id: req.params.id }
+      });
     });
-    await prisma.order.delete({
-      where: { id: req.params.id }
+
+    await logAudit('ORDER_DELETE', {
+      userId: req.user.id,
+      resource: 'Order',
+      details: JSON.stringify({ orderId: req.params.id }),
+      ip: req.ip
     });
+
     res.json({ message: 'Order deleted successfully' });
   } catch (error) {
-    console.error('DELETE /api/orders error:', error);
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء حذف الطلب');
   }
 });
 
@@ -3168,7 +3526,7 @@ app.post('/api/orders/:id/ship', adminAuthenticate, async (req, res) => {
       order: updatedOrder 
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendSafeError(res, error);
   }
 });
 
@@ -3187,8 +3545,7 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename=${filenamePrefix}-${dateStr}.zip`);
     res.send(zipBuffer);
   } catch (error) {
-    console.error('Backup error:', error);
-    res.status(500).json({ error: 'Failed to create backup: ' + error.message });
+    sendSafeError(res, error, 'فشل في إنشاء النسخة الاحتياطية');
   }
 });
 
@@ -3202,8 +3559,7 @@ app.post('/api/admin/restore', adminAuthenticate, backupUpload.single('backup'),
       ...result
     });
   } catch (error) {
-    console.error('Restore error:', error);
-    res.status(500).json({ error: 'Failed to restore backup: ' + error.message });
+    sendSafeError(res, error, 'فشل في استعادة النسخة الاحتياطية');
   }
 });
 
@@ -3405,25 +3761,33 @@ app.post('/api/admin/clean-base64-images', adminAuthenticate, async (req, res) =
 
     res.json({ message: 'تم تنظيف قاعدة البيانات بنجاح وحذف كافة الصور الـ Base64', count: totalUpdated });
   } catch (error) {
-    console.error('Cleanup error:', error);
-    res.status(500).json({ error: 'حدث خطأ أثناء تنظيف قاعدة البيانات: ' + error.message });
+    sendSafeError(res, error, 'حدث خطأ أثناء تنظيف قاعدة البيانات');
   }
 });
 
-app.get('/api/debug-images', async (req, res) => {
+app.get('/api/debug-images', adminAuthenticate, async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
   try {
     const categories = await prisma.category.findMany({ select: { id: true, name: true, image: true }, take: 10 });
     const products = await prisma.product.findMany({ select: { id: true, title: true, image: true, images: true }, take: 10 });
     res.json({ categories, products });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('debug-images error:', error);
+    res.status(500).json({ error: 'حدث خطأ' });
   }
 });
 
 app.use((err, req, res, next) => {
-  console.error('Unhandled API error:', err);
-  const status = err.status || (err.message === 'Invalid file type' ? 400 : 500);
-  res.status(status).json({ error: err.message || 'حدث خطأ في الخادم' });
+  const reqId = crypto.randomBytes(4).toString('hex');
+  console.error(`[ERR:${reqId}]`, err);
+  const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
+  // Never expose internal error details to the client
+  const userMessage = status < 500
+    ? (err.message || 'طلب غير صالح')
+    : 'حدث خطأ في الخادم';
+  res.status(status).json({ error: userMessage, requestId: reqId });
 });
 
 
