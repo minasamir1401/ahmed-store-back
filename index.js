@@ -3217,30 +3217,68 @@ app.get('/api/orders', adminAuthenticate, async (req, res) => {
   }
 });
 
-app.get('/api/orders/track/:orderNumber', async (req, res) => {
+app.get(['/api/orders/track/:orderNumber', '/api/orders/lookup/:orderNumber'], async (req, res) => {
   try {
-    const orderNumber = req.params.orderNumber.toUpperCase();
-    const phone = normalizeString(req.query.phone, 40);
-    if (!phone) return res.status(400).json({ error: 'رقم الهاتف مطلوب لتتبع الطلب' });
-    const orders = await prisma.order.findMany({
-      where: { 
-        orderNumber,
-        customerPhone: phone
+    const rawOrderNum = String(req.params.orderNumber || '').trim().toUpperCase();
+    const cleanOrderNumber = rawOrderNum.replace(/[^A-Z0-9-]/g, '');
+    const rawPhone = normalizeString(req.query.phone, 40);
+    
+    if (!cleanOrderNumber) {
+      return res.status(400).json({ error: 'رقم الطلب غير صالح' });
+    }
+    if (!rawPhone) {
+      return res.status(400).json({ error: 'رقم الهاتف مطلوب لتتبع الطلب' });
+    }
+
+    const queryDigits = rawPhone.replace(/\D/g, '');
+    if (!queryDigits) {
+      return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        OR: [
+          { orderNumber: cleanOrderNumber },
+          { orderNumber: rawOrderNum },
+          { orderNumber: { contains: cleanOrderNumber } }
+        ]
       },
-      include: { items: true },
-      take: 1
+      include: { items: true }
     });
-    const order = orders[0];
+
     if (!order) {
       return res.status(404).json({ error: 'الطلب غير موجود. يرجى التأكد من رقم الطلب' });
     }
+
+    const dbPhone = String(order.customerPhone || '');
+    const dbDigits = dbPhone.replace(/\D/g, '');
+
+    const last9Query = queryDigits.slice(-9);
+    const last9Db = dbDigits.slice(-9);
+
+    const isMatch = dbDigits === queryDigits ||
+      dbPhone.includes(rawPhone) ||
+      rawPhone.includes(dbPhone) ||
+      (last9Query.length >= 9 && dbDigits.includes(last9Query)) ||
+      (last9Db.length >= 9 && queryDigits.includes(last9Db));
+
+    if (!isMatch) {
+      return res.status(403).json({ error: 'رقم الهاتف غير مطابق لبيانات هذا الطلب' });
+    }
+
     res.json({
       id: order.id,
       orderNumber: order.orderNumber,
       customerName: order.customerName,
       customerPhone: order.customerPhone,
+      customerEmail: order.customerEmail,
       governorate: order.governorate,
       district: order.district,
+      address: order.address,
+      building: order.building,
+      floor: order.floor,
+      apartment: order.apartment,
+      notes: order.notes,
       paymentMethod: order.paymentMethod,
       shippingFee: order.shippingFee,
       total: order.total,
@@ -3365,7 +3403,7 @@ app.post('/api/orders', ordersLimiter, optionalAuthenticate, async (req, res) =>
 
 Your order has been successfully placed at The VitaHub.
 
-Order details #${order.orderNumber}:
+Order details (#${order.orderNumber}):
 ${itemsListText}
 
 Shipping & Delivery: ${shippingFeeText}
@@ -3378,7 +3416,7 @@ Thank you for shopping with us.`
 
 تم استلام طلبك بنجاح في متجر The VitaHub.
 
-تفاصيل طلبك رقم #${order.orderNumber}:
+تفاصيل طلبك (#${order.orderNumber}):
 ${itemsListText}
 
 الشحن والتوصيل: ${shippingFeeText}
