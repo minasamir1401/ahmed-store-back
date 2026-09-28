@@ -15,6 +15,12 @@ const sharp = require('sharp');
 const { initWhatsApp, logoutWhatsApp, sendWhatsAppMessage, getStatus } = require('./src/services/whatsappService');
 const { notifyGoogleIndexing } = require('./src/services/googleIndexingService');
 const { sendOrderConfirmationEmail, sendAdminOrderNotificationEmail } = require('./src/services/emailService');
+const {
+  generateFacebookXmlFeed,
+  generateFacebookCsvFeed,
+  getCatalogFeedStats,
+  invalidateCatalogCache,
+} = require('./src/services/catalogFeedService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -2688,6 +2694,55 @@ app.delete('/api/brands/:id', adminAuthenticate, async (req, res) => {
   }
 });
 
+// ── Facebook & Google Product Catalog Feed ───────────────────
+app.get('/api/catalog/facebook-feed.xml', async (req, res) => {
+  try {
+    const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
+    const xml = await generateFacebookXmlFeed(prisma, siteUrl);
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');
+    res.send(xml);
+  } catch (error) {
+    console.error('Error generating facebook-feed.xml:', error);
+    sendSafeError(res, error);
+  }
+});
+
+app.get('/api/catalog/feed.xml', async (req, res) => {
+  try {
+    const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
+    const xml = await generateFacebookXmlFeed(prisma, siteUrl);
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');
+    res.send(xml);
+  } catch (error) {
+    sendSafeError(res, error);
+  }
+});
+
+app.get('/api/catalog/facebook-feed.csv', async (req, res) => {
+  try {
+    const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
+    const csv = await generateFacebookCsvFeed(prisma, siteUrl);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="the-vitahub-facebook-catalog.csv"');
+    res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');
+    res.send(csv);
+  } catch (error) {
+    console.error('Error generating facebook-feed.csv:', error);
+    sendSafeError(res, error);
+  }
+});
+
+app.get('/api/catalog/status', async (req, res) => {
+  try {
+    const stats = await getCatalogFeedStats(prisma);
+    res.json(stats);
+  } catch (error) {
+    sendSafeError(res, error);
+  }
+});
+
 // ── Products Endpoints ────────────────────────────────────────
 app.get('/api/products', async (req, res) => {
   try {
@@ -2838,6 +2893,8 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
       addToSeoQueue(product.id);
     }
 
+    invalidateCatalogCache();
+
     res.status(201).json(product);
   } catch (error) {
     console.error('POST /api/products error:', error);
@@ -2863,6 +2920,8 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
     } catch (unlinkErr) {
       console.error('Failed to delete uploaded temp file:', unlinkErr);
     }
+
+    invalidateCatalogCache();
 
     res.json({
       success: true,
@@ -2909,6 +2968,7 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
     if (slugParam !== product.id) {
       notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_UPDATED');
     }
+    invalidateCatalogCache();
     res.json(product);
   } catch (error) {
     console.error('PATCH /api/products error:', error);
@@ -2928,6 +2988,7 @@ app.delete('/api/products/:id', adminAuthenticate, async (req, res) => {
         notifyGoogleIndexing(`${SITE_URL}/product/${slugParam}`, 'URL_DELETED');
       }
     }
+    invalidateCatalogCache();
     res.json({ message: 'Product deleted' });
   } catch (error) {
     console.error('Error:', error);
