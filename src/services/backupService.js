@@ -94,7 +94,11 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
     tables.map(async (table) => {
       try {
         if (prisma[table]) {
-          const rows = await prisma[table].findMany();
+          const rows = table === 'pixelEvent'
+            ? await prisma[table].findMany({ take: 2000, orderBy: { createdAt: 'desc' } })
+            : (table === 'indexingLog'
+              ? await prisma[table].findMany({ take: 1000, orderBy: { createdAt: 'desc' } })
+              : await prisma[table].findMany());
           dbData[table] = rows;
           recordCounts[table] = rows.length;
         } else {
@@ -115,16 +119,13 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
 
   let uploadFilesCount = 0;
   if (includeMedia && fs.existsSync(uploadsDir)) {
-    const files = fs.readdirSync(uploadsDir);
-    for (const file of files) {
-      const filePath = path.join(uploadsDir, file);
-      try {
-        const stat = fs.statSync(filePath);
-        if (stat.isFile() && stat.size > 0) {
-          zip.addLocalFile(filePath, 'uploads');
-          uploadFilesCount++;
-        }
-      } catch (e) {}
+    zip.addLocalFolder(uploadsDir, 'uploads');
+    const entries = zip.getEntries();
+    for (const entry of entries) {
+      if (entry.entryName.startsWith('uploads/')) {
+        entry.header.method = 0; // STORE mode: 0 compression overhead for existing images
+        if (!entry.isDirectory) uploadFilesCount++;
+      }
     }
   }
 
@@ -141,7 +142,7 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
   };
   zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
 
-  return await zip.toBufferPromise();
+  return zip.toBuffer();
 }
 
 async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdminUser) {

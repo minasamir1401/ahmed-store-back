@@ -305,9 +305,16 @@ const pick = (source, allowedKeys) => {
 
 // ── Auth Middlewares ──────────────────────────────────────────
 const authenticate = asyncHandler(async (req, res, next) => {
+  let token = null;
   const header = req.headers.authorization || '';
-  const [scheme, token] = header.split(' ');
-  if (scheme !== 'Bearer' || !token) return res.status(401).json({ error: 'Unauthorized' });
+  const [scheme, bearerToken] = header.split(' ');
+  if (scheme === 'Bearer' && bearerToken) {
+    token = bearerToken;
+  } else if (req.query?.token && typeof req.query.token === 'string') {
+    token = req.query.token.trim();
+  }
+
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
@@ -3649,9 +3656,11 @@ app.get('/api/admin/backup', adminAuthenticate, async (req, res) => {
     const includeMedia = type !== 'data' && req.query.media !== 'false';
     const zipBuffer = await generateFullStoreBackup(prisma, uploadsDir, { includeMedia });
     const dateStr = new Date().toISOString().slice(0, 10);
-    const filenamePrefix = includeMedia ? 'mithaly-full-backup' : 'mithaly-data-backup';
+    const filenamePrefix = includeMedia ? 'the-vitahub-full-backup' : 'the-vitahub-data-backup';
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename=${filenamePrefix}-${dateStr}.zip`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filenamePrefix}-${dateStr}.zip"`);
+    res.setHeader('Content-Length', zipBuffer.length);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.send(zipBuffer);
   } catch (error) {
     sendSafeError(res, error, 'فشل في إنشاء النسخة الاحتياطية');
