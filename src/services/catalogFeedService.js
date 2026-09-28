@@ -15,17 +15,28 @@ function cleanText(text, maxLength = 5000) {
   if (!text) return '';
   return String(text)
     .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
+    // Strip XML invalid control characters (XML 1.0 restricts 0x00-0x1F except tab, CR, LF)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
     .replace(/\]\]>/g, ']]&gt;')
+    .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
 }
 
+function escapeCdata(text) {
+  if (!text) return '';
+  return String(text).replace(/\]\]>/g, ']]&gt;');
+}
+
 function resolveImageUrl(imagePath, siteUrl) {
   if (!imagePath) return `${siteUrl}/logo-header.jpg`;
-  if (/^https?:\/\//i.test(imagePath)) return imagePath;
+  
+  if (/^https?:\/\//i.test(imagePath)) {
+    // Encode spaces in external URLs
+    return imagePath.trim().replace(/ /g, '%20');
+  }
 
-  const cleanPath = imagePath.startsWith('/') ? imagePath : `/${imagePath}`;
+  const cleanPath = imagePath.trim().startsWith('/') ? imagePath.trim() : `/${imagePath.trim()}`;
   const encodedPath = cleanPath
     .split('/')
     .map((segment) => encodeURIComponent(segment))
@@ -45,7 +56,7 @@ async function getFeedProducts(prisma) {
 
 function buildProductFeedItem(product, siteUrl) {
   const param = getProductUrlParam(product);
-  const link = `${siteUrl}/product/${param}`;
+  const link = `${siteUrl}/product/${param}`.replace(/ /g, '%20');
   const imageLink = resolveImageUrl(product.image, siteUrl);
 
   const rawTitle = cleanText(product.title, 150);
@@ -96,21 +107,21 @@ async function generateFacebookXmlFeed(prisma, siteUrl = 'https://the-vitahub.co
     .map((product) => {
       const item = buildProductFeedItem(product, cleanSiteUrl);
       return `    <item>
-      <g:id>${item.id}</g:id>
-      <g:title><![CDATA[${item.title}]]></g:title>
-      <g:description><![CDATA[${item.description}]]></g:description>
-      <g:link>${item.link}</g:link>
-      <g:image_link>${item.imageLink}</g:image_link>
-      <g:brand><![CDATA[${item.brand}]]></g:brand>
+      <g:id><![CDATA[${item.id}]]></g:id>
+      <g:title><![CDATA[${escapeCdata(item.title)}]]></g:title>
+      <g:description><![CDATA[${escapeCdata(item.description)}]]></g:description>
+      <g:link><![CDATA[${escapeCdata(item.link)}]]></g:link>
+      <g:image_link><![CDATA[${escapeCdata(item.imageLink)}]]></g:image_link>
+      <g:brand><![CDATA[${escapeCdata(item.brand)}]]></g:brand>
       <g:condition>${item.condition}</g:condition>
       <g:availability>${item.availability}</g:availability>
       <g:price>${item.price}</g:price>
-${item.salePrice ? `      <g:sale_price>${item.salePrice}</g:sale_price>\n` : ''}      <g:google_product_category><![CDATA[${item.googleProductCategory}]]></g:google_product_category>
-      <g:fb_product_category><![CDATA[${item.googleProductCategory}]]></g:fb_product_category>
-      <g:product_type><![CDATA[${item.productType}]]></g:product_type>
-      <g:item_group_id>${item.id}</g:item_group_id>
-      <g:custom_label_0>The VitaHub</g:custom_label_0>
-      <g:custom_label_1><![CDATA[${item.categoryName}]]></g:custom_label_1>
+${item.salePrice ? `      <g:sale_price>${item.salePrice}</g:sale_price>\n` : ''}      <g:google_product_category><![CDATA[${escapeCdata(item.googleProductCategory)}]]></g:google_product_category>
+      <g:fb_product_category><![CDATA[${escapeCdata(item.googleProductCategory)}]]></g:fb_product_category>
+      <g:product_type><![CDATA[${escapeCdata(item.productType)}]]></g:product_type>
+      <g:item_group_id><![CDATA[${item.id}]]></g:item_group_id>
+      <g:custom_label_0><![CDATA[The VitaHub]]></g:custom_label_0>
+      <g:custom_label_1><![CDATA[${escapeCdata(item.categoryName)}]]></g:custom_label_1>
     </item>`;
     })
     .join('\n');
