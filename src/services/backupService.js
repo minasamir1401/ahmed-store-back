@@ -1,6 +1,7 @@
 const AdmZip = require('adm-zip');
 const fs = require('fs');
 const path = require('path');
+const { invalidateCatalogCache } = require('./catalogFeedService');
 
 function getExtensionFromMime(mimeType, url) {
   if (mimeType) {
@@ -165,9 +166,13 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
   const zipEntries = zip.getEntries();
   for (const entry of zipEntries) {
     if (entry.entryName.startsWith('uploads/') && !entry.isDirectory) {
-      const fileName = entry.name;
-      if (fileName) {
-        const targetPath = path.join(uploadsDir, fileName);
+      const relPath = entry.entryName.replace(/^uploads\//, '');
+      if (relPath) {
+        const targetPath = path.join(uploadsDir, relPath);
+        const targetDir = path.dirname(targetPath);
+        if (!fs.existsSync(targetDir)) {
+          fs.mkdirSync(targetDir, { recursive: true });
+        }
         fs.writeFileSync(targetPath, entry.getData());
         extractedCount++;
       }
@@ -319,6 +324,8 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
     if (tx.indexingLog) await tx.indexingLog.deleteMany();
     if (tx.whatsAppSession) await tx.whatsAppSession.deleteMany();
     if (tx.pixelEvent) await tx.pixelEvent.deleteMany();
+    if (tx.auditLog) await tx.auditLog.deleteMany();
+    if (tx.revokedToken) await tx.revokedToken.deleteMany();
     if (tx.user) await tx.user.deleteMany();
 
     // Insert Users
@@ -535,8 +542,13 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
     }
   }
 
+  try {
+    invalidateCatalogCache();
+  } catch (e) {}
+
   return {
     productsRestored: sanitizedProducts.length,
+    articlesRestored: Array.isArray(dbData.medicalTip) ? dbData.medicalTip.length : 0,
     categoriesRestored: sanitizedCategories.length,
     brandsRestored: sanitizedBrands.length,
     indexingLogsRestored: Array.isArray(dbData.indexingLog) ? dbData.indexingLog.length : 0,
