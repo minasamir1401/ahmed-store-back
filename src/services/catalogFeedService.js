@@ -54,10 +54,24 @@ async function getFeedProducts(prisma) {
   });
 }
 
+function parseGalleryImages(raw, productId, siteUrl) {
+  if (!raw) return [];
+  try {
+    const list = Array.isArray(raw) ? raw : JSON.parse(raw);
+    if (Array.isArray(list)) {
+      return list.slice(0, 10).map((_, idx) => `${siteUrl}/api/catalog/image/${productId}/gallery/${idx}.jpg`);
+    }
+  } catch {}
+  return [];
+}
+
 function buildProductFeedItem(product, siteUrl) {
   const param = getProductUrlParam(product);
   const link = `${siteUrl}/product/${param}`.replace(/ /g, '%20');
-  const imageLink = resolveImageUrl(product.image, siteUrl);
+  
+  // Dedicated high-resolution JPEG endpoint ensuring 100% Meta compliance regardless of source format (AVIF, WebP, external)
+  const imageLink = `${siteUrl}/api/catalog/image/${product.id}.jpg`;
+  const additionalImages = parseGalleryImages(product.images, product.id, siteUrl);
 
   const rawTitle = cleanText(product.title, 150);
   const title = rawTitle.includes('The VitaHub') ? rawTitle : `${rawTitle} | The VitaHub`;
@@ -83,6 +97,7 @@ function buildProductFeedItem(product, siteUrl) {
     description: rawDesc,
     link,
     imageLink,
+    additionalImages,
     brand: brandName,
     condition: 'new',
     availability: 'in stock',
@@ -106,13 +121,17 @@ async function generateFacebookXmlFeed(prisma, siteUrl = 'https://the-vitahub.co
   const itemsXml = products
     .map((product) => {
       const item = buildProductFeedItem(product, cleanSiteUrl);
+      const additionalTags = (item.additionalImages || [])
+        .map((img) => `      <g:additional_image_link><![CDATA[${escapeCdata(img)}]]></g:additional_image_link>`)
+        .join('\n');
+
       return `    <item>
       <g:id><![CDATA[${item.id}]]></g:id>
       <g:title><![CDATA[${escapeCdata(item.title)}]]></g:title>
       <g:description><![CDATA[${escapeCdata(item.description)}]]></g:description>
       <g:link><![CDATA[${escapeCdata(item.link)}]]></g:link>
       <g:image_link><![CDATA[${escapeCdata(item.imageLink)}]]></g:image_link>
-      <g:brand><![CDATA[${escapeCdata(item.brand)}]]></g:brand>
+${additionalTags ? additionalTags + '\n' : ''}      <g:brand><![CDATA[${escapeCdata(item.brand)}]]></g:brand>
       <g:condition>${item.condition}</g:condition>
       <g:availability>${item.availability}</g:availability>
       <g:price>${item.price}</g:price>
@@ -166,6 +185,7 @@ async function generateFacebookCsvFeed(prisma, siteUrl = 'https://the-vitahub.co
     'price',
     'link',
     'image_link',
+    'additional_image_link',
     'brand',
     'google_product_category',
     'fb_product_category',
@@ -185,6 +205,7 @@ async function generateFacebookCsvFeed(prisma, siteUrl = 'https://the-vitahub.co
       escapeCsvField(item.price),
       escapeCsvField(item.link),
       escapeCsvField(item.imageLink),
+      escapeCsvField(item.additionalImages?.join(',') || ''),
       escapeCsvField(item.brand),
       escapeCsvField(item.googleProductCategory),
       escapeCsvField(item.googleProductCategory),

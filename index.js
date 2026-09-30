@@ -21,6 +21,7 @@ const {
   getCatalogFeedStats,
   invalidateCatalogCache,
 } = require('./src/services/catalogFeedService');
+const { serveCatalogProductImage } = require('./src/services/catalogImageService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -2748,6 +2749,14 @@ app.get('/api/catalog/status', async (req, res) => {
   } catch (error) {
     sendSafeError(res, error);
   }
+});
+
+app.get(['/api/catalog/image/:productId', '/api/catalog/image/:productId.jpg'], async (req, res) => {
+  await serveCatalogProductImage(req, res, prisma);
+});
+
+app.get('/api/catalog/image/:productId/gallery/:galleryIndex.jpg', async (req, res) => {
+  await serveCatalogProductImage(req, res, prisma);
 });
 
 // ── Products Endpoints ────────────────────────────────────────
