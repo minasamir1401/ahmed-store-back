@@ -2780,12 +2780,14 @@ app.get('/api/products', async (req, res) => {
       ...(req.query.brandId ? { brandId: { in: String(req.query.brandId).split(',') } } : {}),
       ...(Object.keys(priceFilter).length > 0 ? { price: priceFilter } : {}),
       ...(q ? {
-        OR: [
-          { title: { contains: q, mode: 'insensitive' } },
-          { titleEn: { contains: q, mode: 'insensitive' } },
-          { seoKeywords: { contains: q, mode: 'insensitive' } },
-          { seoKeywordsEn: { contains: q, mode: 'insensitive' } }
-        ]
+        AND: q.trim().split(/[\\s-]+/).filter(Boolean).map(term => ({
+          OR: [
+            { title: { contains: term, mode: 'insensitive' } },
+            { titleEn: { contains: term, mode: 'insensitive' } },
+            { seoKeywords: { contains: term, mode: 'insensitive' } },
+            { seoKeywordsEn: { contains: term, mode: 'insensitive' } }
+          ]
+        }))
       } : {})
     };
 
