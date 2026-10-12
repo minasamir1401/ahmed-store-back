@@ -78,7 +78,9 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
     'setting',
     'indexingLog',
     'whatsAppSession',
-    'pixelEvent'
+    'pixelEvent',
+    'auditLog',
+    'revokedToken'
   ];
 
   const dynamicTables = Object.keys(prisma).filter(
@@ -87,35 +89,39 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
 
   const tables = Array.from(new Set([...knownTables, ...dynamicTables]));
 
-  const dbData = {};
-  const recordCounts = {};
-
-  await Promise.all(
-    tables.map(async (table) => {
+  // Read one consistent snapshot. Never turn a failed query into an empty backup table.
+  const dbData = await prisma.$transaction(async (tx) => {
+    const snapshot = {};
+    for (const table of tables) {
       try {
-        if (prisma[table]) {
-          const rows = table === 'pixelEvent'
-            ? await prisma[table].findMany({ take: 2000, orderBy: { createdAt: 'desc' } })
-            : (table === 'indexingLog'
-              ? await prisma[table].findMany({ take: 1000, orderBy: { createdAt: 'desc' } })
-              : await prisma[table].findMany());
-          dbData[table] = rows;
-          recordCounts[table] = rows.length;
-        } else {
-          dbData[table] = [];
-          recordCounts[table] = 0;
-        }
+        if (typeof tx[table]?.findMany !== 'function') throw new Error('Database model is unavailable');
+        snapshot[table] = await tx[table].findMany();
       } catch (err) {
-        console.warn(`[Backup] Table "${table}" fetch warning: ${err.message}`);
-        dbData[table] = [];
-        recordCounts[table] = 0;
+        throw new Error(`Backup failed while reading table "${table}": ${err.message}`, { cause: err });
       }
-    })
-  );
+    }
+    return snapshot;
+  }, { isolationLevel: 'RepeatableRead', timeout: 120000, maxWait: 10000 });
+
+  const recordCounts = Object.fromEntries(tables.map(table => [table, dbData[table].length]));
 
   const zip = new AdmZip();
 
   zip.addFile('database.json', Buffer.from(JSON.stringify(dbData, null, 2), 'utf8'));
+  for (const table of tables) {
+    zip.addFile(`tables/${table}.json`, Buffer.from(JSON.stringify(dbData[table], null, 2), 'utf8'));
+  }
+  zip.addFile('README.txt', Buffer.from([
+    'نسخة احتياطية لبيانات متجر The VitaHub',
+    '',
+    'database.json: جميع بيانات الجداول وجميع حقول المنتجات، وهو الملف المستخدم للاستعادة.',
+    'tables/product.json: تفاصيل المنتجات كاملة، بما فيها الوصف والسعر والصور والترجمات وحقول SEO والمكونات والاستخدام.',
+    'tables/: ملف منفصل لكل جدول لقراءة بيانات الطلبات والأقسام والبراندات والمقالات والإعدادات والسجلات.',
+    'manifest.json: فهرس بأعداد السجلات فقط؛ بيانات السجلات موجودة في database.json ومجلد tables.',
+    includeMedia ? 'uploads/: ملفات الصور والمرفقات المرفوعة على السيرفر.' : 'نسخة البيانات تحفظ روابط الصور؛ ملفات الصور نفسها متاحة في نوع النسخة الكاملة.',
+    '',
+    'للاستعادة ارفع ملف ZIP الأصلي بالكامل من لوحة التحكم.',
+  ].join('\r\n'), 'utf8'));
 
   let uploadFilesCount = 0;
   if (includeMedia && fs.existsSync(uploadsDir)) {
@@ -130,13 +136,17 @@ async function generateFullStoreBackup(prisma, uploadsDir, options = {}) {
   }
 
   const manifest = {
-    version: '2.1.0',
+    version: '2.2.0',
+    complete: true,
     type: includeMedia ? 'full' : 'data',
     generatedAt: new Date().toISOString(),
     description: includeMedia
       ? 'Comprehensive store backup containing 100% database tables, logs, settings, and media files'
       : 'Lightweight database backup containing 100% store tables, settings, and logs',
     tables: recordCounts,
+    databaseFile: 'database.json',
+    tableFiles: Object.fromEntries(tables.map(table => [table, `tables/${table}.json`])),
+    fields: Object.fromEntries(tables.map(table => [table, [...new Set(dbData[table].flatMap(row => Object.keys(row)))]])),
     totalRecords: Object.values(recordCounts).reduce((acc, c) => acc + c, 0),
     uploadedFilesCount: uploadFilesCount
   };
@@ -157,6 +167,19 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
   }
 
   const dbData = JSON.parse(zip.readAsText(databaseEntry));
+  if (!dbData || typeof dbData !== 'object' || Array.isArray(dbData)
+    || !Array.isArray(dbData.product) || !Array.isArray(dbData.category) || !Array.isArray(dbData.user)) {
+    throw new Error('Invalid backup archive: required database tables are missing');
+  }
+  const manifestEntry = zip.getEntry('manifest.json');
+  if (manifestEntry) {
+    const manifest = JSON.parse(zip.readAsText(manifestEntry));
+    for (const [table, expectedCount] of Object.entries(manifest.tables || {})) {
+      if (!Array.isArray(dbData[table]) || dbData[table].length !== expectedCount) {
+        throw new Error(`Invalid backup archive: record count mismatch for table "${table}"`);
+      }
+    }
+  }
 
   // 1. Extract uploads to uploadsDir
   if (!fs.existsSync(uploadsDir)) {
@@ -241,9 +264,9 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
       features: p.features || null,
       featuresEn: p.featuresEn || null,
       price: typeof p.price === 'number' ? p.price : parseFloat(p.price) || 0,
-      oldPrice: p.oldPrice ? (typeof p.oldPrice === 'number' ? p.oldPrice : parseFloat(p.oldPrice) || null) : null,
+      oldPrice: p.oldPrice != null ? (typeof p.oldPrice === 'number' ? p.oldPrice : parseFloat(p.oldPrice) || 0) : null,
       discountType: p.discountType || null,
-      discountValue: p.discountValue ? (typeof p.discountValue === 'number' ? p.discountValue : parseFloat(p.discountValue) || null) : null,
+      discountValue: p.discountValue != null ? (typeof p.discountValue === 'number' ? p.discountValue : parseFloat(p.discountValue) || 0) : null,
       image: p.image || '/placeholder.svg',
       images: p.images || null,
       imageAlt: p.imageAlt || null,
@@ -281,11 +304,13 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
   // 5. Prepare users (protect current admin session)
   const rawUsers = Array.isArray(dbData.user) ? dbData.user : [];
   const userEmails = new Set();
+  const userIds = new Set();
   const sanitizedUsers = [];
 
   for (const u of rawUsers) {
     if (!u.email) continue;
     userEmails.add(u.email.toLowerCase());
+    userIds.add(u.id);
     sanitizedUsers.push({
       id: u.id,
       email: u.email.toLowerCase(),
@@ -306,6 +331,7 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
     const existingAdminInDb = await prisma.user.findUnique({ where: { email: currentAdminUser.email.toLowerCase() } });
     if (existingAdminInDb) {
       sanitizedUsers.push(existingAdminInDb);
+      userIds.add(existingAdminInDb.id);
     }
   }
 
@@ -409,7 +435,8 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
           prod4Id: h.prod4Id || null,
           prod4Image: h.prod4Image || null,
           prod4Type: h.prod4Type || 'product',
-          slides: h.slides || null
+          slides: h.slides || null,
+          updatedAt: h.updatedAt ? new Date(h.updatedAt) : new Date()
         }
       });
     } else {
@@ -476,7 +503,7 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
         total: typeof o.total === 'number' ? o.total : parseFloat(o.total) || 0,
         status: o.status || 'pending',
         shippingRef: o.shippingRef || null,
-        userId: o.userId && userEmails.has(o.userId) ? o.userId : null,
+        userId: o.userId && userIds.has(o.userId) ? o.userId : null,
         createdAt: o.createdAt ? new Date(o.createdAt) : new Date(),
         updatedAt: o.updatedAt ? new Date(o.updatedAt) : new Date()
       }));
@@ -523,6 +550,20 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
       }));
       await tx.pixelEvent.createMany({ data: sanitizedPixelEvents });
     }
+
+    if (tx.auditLog && Array.isArray(dbData.auditLog) && dbData.auditLog.length > 0) {
+      await tx.auditLog.createMany({ data: dbData.auditLog.map(row => ({
+        id: row.id, userId: row.userId ?? null, action: row.action,
+        resource: row.resource ?? null, details: row.details ?? null, ipAddress: row.ipAddress ?? null,
+        createdAt: row.createdAt ? new Date(row.createdAt) : new Date()
+      })) });
+    }
+    if (tx.revokedToken && Array.isArray(dbData.revokedToken) && dbData.revokedToken.length > 0) {
+      await tx.revokedToken.createMany({ data: dbData.revokedToken.map(row => ({
+        id: row.id, tokenHash: row.tokenHash,
+        expiresAt: new Date(row.expiresAt), createdAt: row.createdAt ? new Date(row.createdAt) : new Date()
+      })) });
+    }
   }, {
     timeout: 60000,
     maxWait: 10000
@@ -557,6 +598,8 @@ async function restoreFullStoreBackup(prisma, zipBuffer, uploadsDir, currentAdmi
     ordersRestored: Array.isArray(dbData.order) ? dbData.order.length : 0,
     whatsAppSessionsRestored: Array.isArray(dbData.whatsAppSession) ? dbData.whatsAppSession.length : 0,
     pixelEventsRestored: Array.isArray(dbData.pixelEvent) ? dbData.pixelEvent.length : 0,
+    auditLogsRestored: Array.isArray(dbData.auditLog) ? dbData.auditLog.length : 0,
+    revokedTokensRestored: Array.isArray(dbData.revokedToken) ? dbData.revokedToken.length : 0,
     imagesExtracted: extractedCount
   };
 }
