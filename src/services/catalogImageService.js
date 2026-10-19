@@ -70,6 +70,9 @@ async function getSourceBuffer(imagePath) {
 }
 
 async function serveFallback(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   try {
     if (fs.existsSync(FALLBACK_IMAGE_PATH)) {
       const fallbackBuffer = await sharp(FALLBACK_IMAGE_PATH)
@@ -100,6 +103,9 @@ async function serveFallback(res) {
 }
 
 async function serveCatalogProductImage(req, res, prisma) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   try {
     ensureCacheDir();
 

@@ -421,22 +421,41 @@ const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .map(origin => origin.trim())
   .filter(Boolean);
 
+const isTrustedCrawlerOrigin = (origin) => {
+  if (!origin) return false;
+  return /^https?:\/\/([a-zA-Z0-9-]+\.)*(facebook\.com|fbcdn\.net|instagram\.com|google\.com|googleusercontent\.com)$/i.test(origin);
+};
+
 const corsOptions = {
   origin: (origin, callback) => {
     const origins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins;
     const isLocalhost = /^https?:\/\/localhost(:\d+)?$/.test(origin);
     const allowLocalhost = process.env.NODE_ENV !== 'production';
-    if (!origin || origins.includes(origin) || (allowLocalhost && isLocalhost)) {
+    if (!origin || origins.includes(origin) || (allowLocalhost && isLocalhost) || isTrustedCrawlerOrigin(origin)) {
       return callback(null, true);
     }
-    callback(new Error('Not allowed by CORS'));
+    callback(null, false);
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
   credentials: true,
   optionsSuccessStatus: 200,
 };
-app.use(cors(corsOptions));
+
+// Public catalog and uploads middleware - ensures feeds and images are accessible to external crawlers and Commerce Manager
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/catalog') || req.path.startsWith('/uploads')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    return next();
+  }
+  cors(corsOptions)(req, res, next);
+});
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -2707,6 +2726,8 @@ app.get('/api/catalog/facebook-feed.xml', async (req, res) => {
   try {
     const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
     const xml = await generateFacebookXmlFeed(prisma, siteUrl);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');
     res.send(xml);
@@ -2720,6 +2741,8 @@ app.get('/api/catalog/feed.xml', async (req, res) => {
   try {
     const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
     const xml = await generateFacebookXmlFeed(prisma, siteUrl);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');
     res.send(xml);
@@ -2732,6 +2755,8 @@ app.get('/api/catalog/facebook-feed.csv', async (req, res) => {
   try {
     const siteUrl = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
     const csv = await generateFacebookCsvFeed(prisma, siteUrl);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'inline; filename="the-vitahub-facebook-catalog.csv"');
     res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=3600');

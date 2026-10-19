@@ -28,6 +28,16 @@ function escapeCdata(text) {
   return String(text).replace(/\]\]>/g, ']]&gt;');
 }
 
+function escapeXml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 function resolveImageUrl(imagePath, siteUrl) {
   if (!imagePath) return `${siteUrl}/logo-header.jpg`;
   
@@ -122,15 +132,15 @@ async function generateFacebookXmlFeed(prisma, siteUrl = 'https://the-vitahub.co
     .map((product) => {
       const item = buildProductFeedItem(product, cleanSiteUrl);
       const additionalTags = (item.additionalImages || [])
-        .map((img) => `      <g:additional_image_link><![CDATA[${escapeCdata(img)}]]></g:additional_image_link>`)
+        .map((img) => `      <g:additional_image_link>${escapeXml(img)}</g:additional_image_link>`)
         .join('\n');
 
       return `    <item>
-      <g:id><![CDATA[${item.id}]]></g:id>
+      <g:id>${escapeXml(item.id)}</g:id>
       <g:title><![CDATA[${escapeCdata(item.title)}]]></g:title>
       <g:description><![CDATA[${escapeCdata(item.description)}]]></g:description>
-      <g:link><![CDATA[${escapeCdata(item.link)}]]></g:link>
-      <g:image_link><![CDATA[${escapeCdata(item.imageLink)}]]></g:image_link>
+      <g:link>${escapeXml(item.link)}</g:link>
+      <g:image_link>${escapeXml(item.imageLink)}</g:image_link>
 ${additionalTags ? additionalTags + '\n' : ''}      <g:brand><![CDATA[${escapeCdata(item.brand)}]]></g:brand>
       <g:condition>${item.condition}</g:condition>
       <g:availability>${item.availability}</g:availability>
@@ -138,7 +148,7 @@ ${additionalTags ? additionalTags + '\n' : ''}      <g:brand><![CDATA[${escapeCd
 ${item.salePrice ? `      <g:sale_price>${item.salePrice}</g:sale_price>\n` : ''}      <g:google_product_category><![CDATA[${escapeCdata(item.googleProductCategory)}]]></g:google_product_category>
       <g:fb_product_category><![CDATA[${escapeCdata(item.googleProductCategory)}]]></g:fb_product_category>
       <g:product_type><![CDATA[${escapeCdata(item.productType)}]]></g:product_type>
-      <g:item_group_id><![CDATA[${item.id}]]></g:item_group_id>
+      <g:item_group_id>${escapeXml(item.id)}</g:item_group_id>
       <g:custom_label_0><![CDATA[The VitaHub]]></g:custom_label_0>
       <g:custom_label_1><![CDATA[${escapeCdata(item.categoryName)}]]></g:custom_label_1>
     </item>`;
