@@ -1,4 +1,5 @@
 const { slugify, getProductUrlParam } = require('../utils/slug');
+const { parseProductImages } = require('../utils/productImages');
 
 let cachedXml = null;
 let cachedCsv = null;
@@ -65,14 +66,8 @@ async function getFeedProducts(prisma) {
 }
 
 function parseGalleryImages(raw, productId, siteUrl) {
-  if (!raw) return [];
-  try {
-    const list = Array.isArray(raw) ? raw : JSON.parse(raw);
-    if (Array.isArray(list)) {
-      return list.slice(0, 10).map((_, idx) => `${siteUrl}/api/catalog/image/${productId}/gallery/${idx}.jpg`);
-    }
-  } catch {}
-  return [];
+  return parseProductImages(raw).slice(0, 10)
+    .map((_, idx) => `${siteUrl}/api/catalog/image/${productId}/gallery/${idx}.jpg`);
 }
 
 function buildProductFeedItem(product, siteUrl) {
@@ -80,8 +75,10 @@ function buildProductFeedItem(product, siteUrl) {
   const link = `${siteUrl}/product/${param}`.replace(/ /g, '%20');
   
   // Dedicated high-resolution JPEG endpoint ensuring 100% Meta compliance regardless of source format (AVIF, WebP, external)
-  const imageLink = `${siteUrl}/api/catalog/image/${product.id}.jpg`;
-  const additionalImages = parseGalleryImages(product.images, product.id, siteUrl);
+  const updatedAt = new Date(product.updatedAt).getTime();
+  const withVersion = url => Number.isFinite(updatedAt) ? `${url}?v=${updatedAt}` : url;
+  const imageLink = withVersion(`${siteUrl}/api/catalog/image/${product.id}.jpg`);
+  const additionalImages = parseGalleryImages(product.images, product.id, siteUrl).map(withVersion);
 
   const rawTitle = cleanText(product.title, 150);
   const title = rawTitle.includes('The VitaHub') ? rawTitle : `${rawTitle} | The VitaHub`;

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { generateFacebookXmlFeed, generateFacebookCsvFeed } = require('../src/services/catalogFeedService');
+const { generateFacebookXmlFeed, generateFacebookCsvFeed, invalidateCatalogCache } = require('../src/services/catalogFeedService');
 
 test('catalog XML feed outputs clean entity-escaped URLs and IDs without CDATA wrappers', async () => {
   const mockPrisma = {
@@ -99,4 +99,36 @@ test('serveCatalogProductImage attaches CORS and CORP headers on fallback and va
   assert.equal(headers['access-control-allow-origin'], '*');
   assert.equal(headers['cross-origin-resource-policy'], 'cross-origin');
   assert.equal(headers['content-type'], 'image/jpeg');
+});
+
+test('XML and CSV include legacy comma-separated gallery images using the same indices as the image server', async () => {
+  invalidateCatalogCache();
+  const product = { id: 'legacy', title: 'Legacy product', price: 200, image: '/uploads/front.jpg', images: '/uploads/back.avif, /uploads/side.jpg' };
+  const prisma = { product: { findMany: async () => [product] } };
+  const xml = await generateFacebookXmlFeed(prisma);
+  const csv = await generateFacebookCsvFeed(prisma);
+  for (const index of [0, 1]) {
+    const url = `https://the-vitahub.com/api/catalog/image/legacy/gallery/${index}.jpg`;
+    assert.ok(xml.includes(`<g:additional_image_link>${url}</g:additional_image_link>`));
+    assert.ok(csv.includes(url));
+  }
+  invalidateCatalogCache();
+});
+
+test('gallery parser preserves commas inside JSON-encoded image URLs', () => {
+  const { parseProductImages } = require('../src/utils/productImages');
+  const url = 'https://images.example/f_auto,q_auto/product.jpg';
+  assert.deepEqual(parseProductImages(JSON.stringify([url, ' /uploads/back.jpg '])), [url, '/uploads/back.jpg']);
+  assert.deepEqual(parseProductImages(null), []);
+});
+
+test('feed image revisions change when a saved product is updated without changing product IDs', async () => {
+  invalidateCatalogCache();
+  const product = { id: 'versioned', title: 'Updated photo', price: 200, image: '/uploads/new.jpg', images: '["/uploads/back.jpg"]', updatedAt: new Date('2026-10-24') };
+  const xml = await generateFacebookXmlFeed({ product: { findMany: async () => [product] } });
+  const revision = product.updatedAt.getTime();
+  assert.ok(xml.includes(`<g:id>versioned</g:id>`));
+  assert.ok(xml.includes(`/api/catalog/image/versioned.jpg?v=${revision}</g:image_link>`));
+  assert.ok(xml.includes(`/api/catalog/image/versioned/gallery/0.jpg?v=${revision}</g:additional_image_link>`));
+  invalidateCatalogCache();
 });

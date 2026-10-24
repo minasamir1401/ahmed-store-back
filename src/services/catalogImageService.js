@@ -1,6 +1,8 @@
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
+const { createHash } = require('node:crypto');
+const { parseProductImages: parseImages } = require('../utils/productImages');
 
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 const CACHE_DIR = path.join(UPLOADS_DIR, 'catalog-cache');
@@ -10,16 +12,6 @@ function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
   }
-}
-
-function parseImages(raw) {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed;
-  } catch {}
-  return String(raw).split(',').map((s) => s.trim()).filter(Boolean);
 }
 
 function sanitizeProductId(rawId) {
@@ -118,7 +110,29 @@ async function serveCatalogProductImage(req, res, prisma) {
     }
 
     const cacheKey = galleryIndex !== null ? `${productId}_g${galleryIndex}.jpg` : `${productId}.jpg`;
-    const cacheFilePath = path.join(CACHE_DIR, cacheKey);
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, image: true, images: true, updatedAt: true },
+    });
+
+    if (!product) {
+      return await serveFallback(res);
+    }
+
+    // Key by source, so replacing a saved image cannot keep serving the old JPEG.
+    // Description/price edits keep the same key and preserve cached remote photos.
+    const sourceHash = createHash('sha256').update(JSON.stringify([product.image, parseImages(product.images)])).digest('hex').slice(0, 16);
+    const cacheFilePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}.jpg`));
+    const legacyCachePath = path.join(CACHE_DIR, cacheKey);
+    if (!fs.existsSync(cacheFilePath) && fs.existsSync(legacyCachePath)) {
+      const legacyStat = await fs.promises.stat(legacyCachePath);
+      // Reuse known existing photos only when the product has not changed since
+      // that cache was generated. This preserves images whose remote host is down.
+      const updatedAt = new Date(product.updatedAt).getTime();
+      if (legacyStat.size > 500 && Number.isFinite(updatedAt) && legacyStat.mtimeMs >= updatedAt) {
+        await fs.promises.copyFile(legacyCachePath, cacheFilePath);
+      }
+    }
 
     if (fs.existsSync(cacheFilePath)) {
       const stat = await fs.promises.stat(cacheFilePath);
@@ -128,15 +142,6 @@ async function serveCatalogProductImage(req, res, prisma) {
         res.setHeader('X-Catalog-Image-Cache', 'HIT');
         return res.sendFile(cacheFilePath);
       }
-    }
-
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
-      select: { id: true, image: true, images: true },
-    });
-
-    if (!product) {
-      return await serveFallback(res);
     }
 
     let targetImagePath = product.image;
