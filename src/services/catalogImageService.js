@@ -1,8 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { parseProductImages: parseImages } = require('../utils/productImages');
+const { CATALOG_IMAGE_FORMAT, normalizeCatalogImage } = require('../utils/catalogImageFormat');
 
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 const CACHE_DIR = path.join(UPLOADS_DIR, 'catalog-cache');
@@ -122,17 +123,9 @@ async function serveCatalogProductImage(req, res, prisma) {
     // Key by source, so replacing a saved image cannot keep serving the old JPEG.
     // Description/price edits keep the same key and preserve cached remote photos.
     const sourceHash = createHash('sha256').update(JSON.stringify([product.image, parseImages(product.images)])).digest('hex').slice(0, 16);
-    const cacheFilePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}.jpg`));
+    const previousCachePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}.jpg`));
+    const cacheFilePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}_${CATALOG_IMAGE_FORMAT}.jpg`));
     const legacyCachePath = path.join(CACHE_DIR, cacheKey);
-    if (!fs.existsSync(cacheFilePath) && fs.existsSync(legacyCachePath)) {
-      const legacyStat = await fs.promises.stat(legacyCachePath);
-      // Reuse known existing photos only when the product has not changed since
-      // that cache was generated. This preserves images whose remote host is down.
-      const updatedAt = new Date(product.updatedAt).getTime();
-      if (legacyStat.size > 500 && Number.isFinite(updatedAt) && legacyStat.mtimeMs >= updatedAt) {
-        await fs.promises.copyFile(legacyCachePath, cacheFilePath);
-      }
-    }
 
     if (fs.existsSync(cacheFilePath)) {
       const stat = await fs.promises.stat(cacheFilePath);
@@ -152,7 +145,19 @@ async function serveCatalogProductImage(req, res, prisma) {
       }
     }
 
-    let sourceBuffer = await getSourceBuffer(targetImagePath);
+    // Reprocess existing cached photos as well as new sources. Merely changing
+    // resize() leaves small photos in the old cache indefinitely.
+    let sourceBuffer = null;
+    if (fs.existsSync(previousCachePath)) {
+      sourceBuffer = await fs.promises.readFile(previousCachePath);
+    } else if (fs.existsSync(legacyCachePath)) {
+      const legacyStat = await fs.promises.stat(legacyCachePath);
+      const updatedAt = new Date(product.updatedAt).getTime();
+      if (legacyStat.size > 500 && Number.isFinite(updatedAt) && legacyStat.mtimeMs >= updatedAt) {
+        sourceBuffer = await fs.promises.readFile(legacyCachePath);
+      }
+    }
+    if (!sourceBuffer) sourceBuffer = await getSourceBuffer(targetImagePath);
 
     // If main image failed, try first gallery image
     if (!sourceBuffer && targetImagePath !== product.image) {
@@ -170,19 +175,14 @@ async function serveCatalogProductImage(req, res, prisma) {
       return await serveFallback(res);
     }
 
-    const processedJpeg = await sharp(sourceBuffer)
-      .rotate()
-      .resize({
-        width: 1200,
-        height: 1200,
-        fit: 'inside',
-        withoutEnlargement: true,
-      })
-      .flatten({ background: { r: 255, g: 255, b: 255 } })
-      .jpeg({ quality: 90, mozjpeg: true })
-      .toBuffer();
+    const processedJpeg = await normalizeCatalogImage(sourceBuffer);
 
-    await fs.promises.writeFile(cacheFilePath, processedJpeg).catch(() => {});
+    // Publish the completed file atomically: concurrent Meta requests must never
+    // read a JPEG while it is still being written.
+    const temporaryPath = `${cacheFilePath}.${randomUUID()}.tmp`;
+    await fs.promises.writeFile(temporaryPath, processedJpeg)
+      .then(() => fs.promises.rename(temporaryPath, cacheFilePath))
+      .catch(() => fs.promises.unlink(temporaryPath).catch(() => {}));
 
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');

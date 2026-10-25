@@ -21,10 +21,13 @@ function harness(product, legacy) {
           stat: async file => ({ size: files.get(file).buffer.length, mtimeMs: files.get(file).time }),
           copyFile: async (from, to) => files.set(to, files.get(from)),
           writeFile: async (file, buffer) => files.set(file, { buffer, time: Date.now() }),
+          rename: async (from, to) => { files.set(to, files.get(from)); files.delete(from); },
+          unlink: async file => files.delete(file),
           readFile: async file => files.get(file).buffer,
         },
       };
       if (name === '../utils/productImages') return require('../src/utils/productImages');
+      if (name === '../utils/catalogImageFormat') return require('../src/utils/catalogImageFormat');
       return require(name);
     },
   });
@@ -55,9 +58,21 @@ test('existing valid cached photos survive deployment even when the external sou
   const product = { id: 'migration', image: 'https://remote.example/front.jpg', images: null, updatedAt: new Date('2026-10-12') };
   const service = harness(product, { buffer: cached, time: Date.parse('2026-10-19') });
   const response = await service.request();
-  assert.equal(response.headers['X-Catalog-Image-Cache'], 'HIT');
-  assert.match(response.file, /migration_[a-f0-9]{16}\.jpg$/);
-  assert.deepEqual(service.files.get(response.file).buffer, cached);
+  assert.equal(response.headers['X-Catalog-Image-Cache'], 'MISS');
+  const metadata = await sharp(response.body).metadata();
+  assert.equal(metadata.width, 1024);
+  assert.equal(metadata.height, 1024);
+  const second = await service.request();
+  assert.equal(second.headers['X-Catalog-Image-Cache'], 'HIT');
+  assert.match(second.file, /migration_[a-f0-9]{16}_square-v1\.jpg$/);
+  // The last release's source-keyed cache is still valid after a description edit.
+  service.files.set(second.file.replace('_square-v1', ''), { buffer: cached, time: Date.parse('2026-10-19') });
+  service.files.delete(second.file);
+  service.files.delete(path.resolve(__dirname, '../uploads/catalog-cache/migration.jpg'));
+  product.updatedAt = new Date('2026-10-25');
+  const reprocessed = await service.request();
+  assert.equal((await sharp(reprocessed.body).metadata()).width, 1024);
+  assert.ok([...service.files.keys()].every(file => !file.endsWith('.tmp')));
 });
 
 test('changing a saved image generates a new cached JPEG instead of returning the old photo', async () => {

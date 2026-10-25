@@ -28,8 +28,8 @@ test('catalog XML feed outputs clean entity-escaped URLs and IDs without CDATA w
   // Verify IDs and URLs are direct XML elements, not wrapped in CDATA
   assert.match(xml, /<g:id>prod_123<\/g:id>/);
   assert.match(xml, /<g:link>https:\/\/the-vitahub\.com\/product\/.*prod_123<\/g:link>/);
-  assert.match(xml, /<g:image_link>https:\/\/the-vitahub\.com\/api\/catalog\/image\/prod_123\.jpg<\/g:image_link>/);
-  assert.match(xml, /<g:additional_image_link>https:\/\/the-vitahub\.com\/api\/catalog\/image\/prod_123\/gallery\/0\.jpg<\/g:additional_image_link>/);
+  assert.match(xml, /<g:image_link>https:\/\/the-vitahub\.com\/api\/catalog\/image\/prod_123\.jpg\?format=square-v1<\/g:image_link>/);
+  assert.match(xml, /<g:additional_image_link>https:\/\/the-vitahub\.com\/api\/catalog\/image\/prod_123\/gallery\/0\.jpg\?format=square-v1<\/g:additional_image_link>/);
   assert.match(xml, /<g:item_group_id>prod_123<\/g:item_group_id>/);
 
   // Negative assertion: g:id and image links must NEVER have CDATA
@@ -108,7 +108,7 @@ test('XML and CSV include legacy comma-separated gallery images using the same i
   const xml = await generateFacebookXmlFeed(prisma);
   const csv = await generateFacebookCsvFeed(prisma);
   for (const index of [0, 1]) {
-    const url = `https://the-vitahub.com/api/catalog/image/legacy/gallery/${index}.jpg`;
+    const url = `https://the-vitahub.com/api/catalog/image/legacy/gallery/${index}.jpg?format=square-v1`;
     assert.ok(xml.includes(`<g:additional_image_link>${url}</g:additional_image_link>`));
     assert.ok(csv.includes(url));
   }
@@ -128,7 +128,7 @@ test('feed image revisions change when a saved product is updated without changi
   const xml = await generateFacebookXmlFeed({ product: { findMany: async () => [product] } });
   const revision = product.updatedAt.getTime();
   assert.ok(xml.includes(`<g:id>versioned</g:id>`));
-  assert.ok(xml.includes(`/api/catalog/image/versioned.jpg?v=${revision}</g:image_link>`));
-  assert.ok(xml.includes(`/api/catalog/image/versioned/gallery/0.jpg?v=${revision}</g:additional_image_link>`));
+  assert.ok(xml.includes(`/api/catalog/image/versioned.jpg?format=square-v1&amp;v=${revision}</g:image_link>`));
+  assert.ok(xml.includes(`/api/catalog/image/versioned/gallery/0.jpg?format=square-v1&amp;v=${revision}</g:additional_image_link>`));
   invalidateCatalogCache();
 });

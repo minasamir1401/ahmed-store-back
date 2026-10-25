@@ -1,5 +1,6 @@
 const { slugify, getProductUrlParam } = require('../utils/slug');
 const { parseProductImages } = require('../utils/productImages');
+const { CATALOG_IMAGE_FORMAT } = require('../utils/catalogImageFormat');
 
 let cachedXml = null;
 let cachedCsv = null;
@@ -74,9 +75,10 @@ function buildProductFeedItem(product, siteUrl) {
   const param = getProductUrlParam(product);
   const link = `${siteUrl}/product/${param}`.replace(/ /g, '%20');
   
-  // Dedicated high-resolution JPEG endpoint ensuring 100% Meta compliance regardless of source format (AVIF, WebP, external)
+  // Version the processing format separately from product edits so Meta refetches
+  // corrected photos even when the product record itself has not changed.
   const updatedAt = new Date(product.updatedAt).getTime();
-  const withVersion = url => Number.isFinite(updatedAt) ? `${url}?v=${updatedAt}` : url;
+  const withVersion = url => `${url}?format=${CATALOG_IMAGE_FORMAT}${Number.isFinite(updatedAt) ? `&v=${updatedAt}` : ''}`;
   const imageLink = withVersion(`${siteUrl}/api/catalog/image/${product.id}.jpg`);
   const additionalImages = parseGalleryImages(product.images, product.id, siteUrl).map(withVersion);
 
