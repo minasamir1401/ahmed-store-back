@@ -2322,6 +2322,8 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
     let msg = error.message || 'حدث خطأ أثناء إرسال البريد التجريبي';
     if (error.code === 'EAUTH' || msg.includes('BadCredentials') || msg.includes('Invalid login')) {
       msg = 'فشل تسجيل الدخول في Gmail SMTP: يرجى التأكد من استخدام "كلمة مرور التطبيقات" (App Password) المكونة من 16 حرفاً من إعدادات أمان حساب Google، وليس كلمة المرور العادية للحساب.';
+    } else if (msg.includes('only send testing emails') || msg.includes('domain is not verified') || msg.includes('verify your domain')) {
+      msg = 'تنبيه منصة Resend: نطاق المتجر (the-vitahub.com) لم يتم توثيقه بعد في لوحة تحكم resend.com/domains بإضافة سجلات الـ DNS (SPF / DKIM). في الوضع التجريبي تمنع Resend الإرسال لأي بريد خارجي حتى يتم توثيق الدومين. للإرسال الفوري دون انتظار توثيق النطاق، يمكنك استخدام خيار Gmail SMTP المتاح بالأسفل مع App Password.';
     } else if (msg.includes('API key is invalid') || msg.includes('resend')) {
       msg = 'فشل الإرسال عبر Resend: يرجى التحقق من مفتاح Resend API Key وتوثيق النطاق الخاص بك.';
     }

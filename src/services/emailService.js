@@ -90,10 +90,11 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, r
   } catch (sdkError) {
     const errMsg = sdkError.message || '';
     const isDomainPending = errMsg.includes('domain is not verified') || errMsg.includes('only send testing emails');
-    const isOwnerRecipient = recipients.some(r => {
-      const lower = String(r).toLowerCase();
-      return lower.includes('mina15g4y@gmail.com');
-    });
+    
+    // Extract owner email from Resend error message if present (e.g. "...to your own email address (user@example.com)...")
+    const ownerEmailMatch = errMsg.match(/\(([^)]+@[^)]+)\)/);
+    const ownerEmail = ownerEmailMatch ? ownerEmailMatch[1].trim().toLowerCase() : '';
+    const isOwnerRecipient = ownerEmail && recipients.some(r => String(r).toLowerCase().includes(ownerEmail));
 
     if (isDomainPending && isOwnerRecipient && !from.includes('onboarding@resend.dev')) {
       const fallbackFrom = `"${senderDisplayName}" <onboarding@resend.dev>`;
