@@ -2308,7 +2308,13 @@ app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) =
     res.json({ message: `تم إرسال البريد الإلكتروني بنجاح [${result.provider || 'email'}]`, result });
   } catch (error) {
     console.error('Test email error:', error);
-    sendSafeError(res, error);
+    let msg = error.message || 'حدث خطأ أثناء إرسال البريد التجريبي';
+    if (error.code === 'EAUTH' || msg.includes('BadCredentials') || msg.includes('Invalid login')) {
+      msg = 'فشل تسجيل الدخول في Gmail SMTP: يرجى التأكد من استخدام "كلمة مرور التطبيقات" (App Password) المكونة من 16 حرفاً من إعدادات أمان حساب Google، وليس كلمة المرور العادية للحساب.';
+    } else if (msg.includes('API key is invalid') || msg.includes('resend')) {
+      msg = 'فشل الإرسال عبر Resend: يرجى التحقق من مفتاح Resend API Key وتوثيق النطاق الخاص بك.';
+    }
+    res.status(400).json({ error: msg });
   }
 });
 
@@ -2441,14 +2447,27 @@ app.get('/api/brands', async (req, res) => {
 });
 
 app.post('/api/brands', adminAuthenticate, async (req, res) => {
-  const { name, nameEn, image } = req.body;
+  const { name, nameEn, image, seoTitle, seoDesc, seoKeywords } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Brand name required' });
   try {
     // Use upsert to avoid duplicate name errors
     const brand = await prisma.brand.upsert({
       where: { name: name.trim() },
-      update: { image: image || undefined, nameEn: nameEn || undefined },
-      create: { name: name.trim(), nameEn: nameEn || null, image: image || null }
+      update: {
+        image: image !== undefined ? (image || null) : undefined,
+        nameEn: nameEn !== undefined ? (nameEn || null) : undefined,
+        seoTitle: seoTitle !== undefined ? (seoTitle || null) : undefined,
+        seoDesc: seoDesc !== undefined ? (seoDesc || null) : undefined,
+        seoKeywords: seoKeywords !== undefined ? (seoKeywords || null) : undefined
+      },
+      create: {
+        name: name.trim(),
+        nameEn: nameEn || null,
+        image: image || null,
+        seoTitle: seoTitle || null,
+        seoDesc: seoDesc || null,
+        seoKeywords: seoKeywords || null
+      }
     });
     res.status(201).json(brand);
   } catch (error) {
@@ -2694,7 +2713,7 @@ app.get('/api/brands/:id', async (req, res) => {
 });
 
 app.patch('/api/brands/:id', adminAuthenticate, async (req, res) => {
-  const { name, nameEn, image } = req.body;
+  const { name, nameEn, image, seoTitle, seoDesc, seoKeywords } = req.body;
   if (name !== undefined && !name.trim()) return res.status(400).json({ error: 'Brand name cannot be empty' });
   try {
     const brand = await prisma.brand.update({
@@ -2702,7 +2721,10 @@ app.patch('/api/brands/:id', adminAuthenticate, async (req, res) => {
       data: {
         name: name !== undefined ? name.trim() : undefined,
         nameEn: nameEn !== undefined ? (nameEn || null) : undefined,
-        image: image !== undefined ? (image || null) : undefined
+        image: image !== undefined ? (image || null) : undefined,
+        seoTitle: seoTitle !== undefined ? (seoTitle || null) : undefined,
+        seoDesc: seoDesc !== undefined ? (seoDesc || null) : undefined,
+        seoKeywords: seoKeywords !== undefined ? (seoKeywords || null) : undefined
       }
     });
     res.json(brand);
@@ -3064,10 +3086,18 @@ app.get('/api/categories', async (req, res) => {
 });
 
 app.post('/api/categories', adminAuthenticate, async (req, res) => {
-  const { name, nameEn, image, href } = req.body;
+  const { name, nameEn, image, href, seoTitle, seoDesc, seoKeywords } = req.body;
   try {
     const category = await prisma.category.create({
-      data: { name, nameEn, image, href }
+      data: {
+        name,
+        nameEn: nameEn || null,
+        image: image || null,
+        href: href || null,
+        seoTitle: seoTitle || null,
+        seoDesc: seoDesc || null,
+        seoKeywords: seoKeywords || null
+      }
     });
     res.status(201).json(category);
   } catch (error) {
@@ -3077,11 +3107,20 @@ app.post('/api/categories', adminAuthenticate, async (req, res) => {
 });
 
 app.patch('/api/categories/:id', adminAuthenticate, async (req, res) => {
-  const { name, nameEn, image, href, count } = req.body;
+  const { name, nameEn, image, href, count, seoTitle, seoDesc, seoKeywords } = req.body;
   try {
     const category = await prisma.category.update({
       where: { id: req.params.id },
-      data: { name, nameEn, image, href, count }
+      data: {
+        name: name !== undefined ? name : undefined,
+        nameEn: nameEn !== undefined ? (nameEn || null) : undefined,
+        image: image !== undefined ? (image || null) : undefined,
+        href: href !== undefined ? (href || null) : undefined,
+        count: count !== undefined ? count : undefined,
+        seoTitle: seoTitle !== undefined ? (seoTitle || null) : undefined,
+        seoDesc: seoDesc !== undefined ? (seoDesc || null) : undefined,
+        seoKeywords: seoKeywords !== undefined ? (seoKeywords || null) : undefined
+      }
     });
     res.json(category);
   } catch (error) {

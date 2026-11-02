@@ -27,23 +27,29 @@ model User {
 }
 
 model Category {
-  id        String    @id @default(cuid())
-  name      String    @unique
-  nameEn    String?
-  image     String?
-  count     Int?      @default(0)
-  href      String?
-  products  Product[]
-  createdAt DateTime  @default(now())
+  id          String    @id @default(cuid())
+  name        String    @unique
+  nameEn      String?
+  image       String?
+  count       Int?      @default(0)
+  href        String?
+  seoTitle    String?
+  seoDesc     String?
+  seoKeywords String?
+  products    Product[]
+  createdAt   DateTime  @default(now())
 }
 
 model Brand {
-  id        String    @id @default(cuid())
-  name      String    @unique
-  nameEn    String?
-  image     String?
-  products  Product[]
-  createdAt DateTime  @default(now())
+  id          String    @id @default(cuid())
+  name        String    @unique
+  nameEn      String?
+  image       String?
+  seoTitle    String?
+  seoDesc     String?
+  seoKeywords String?
+  products    Product[]
+  createdAt   DateTime  @default(now())
 }
 
 model Product {
