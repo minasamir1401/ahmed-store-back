@@ -1829,15 +1829,26 @@ app.post('/api/auth/admin-login', authLimiter, async (req, res) => {
   const cleanIdentifier = rawIdentifier.trim();
 
   try {
-    const adminUser = await prisma.user.findFirst({
+    let adminUser = await prisma.user.findFirst({
       where: {
         role: 'admin',
         OR: [
           { email: cleanIdentifier.toLowerCase() },
-          { phone: cleanIdentifier }
+          { phone: cleanIdentifier },
+          { name: { equals: cleanIdentifier, mode: 'insensitive' } }
         ]
       }
     });
+
+    if (!adminUser && cleanIdentifier.toLowerCase() === 'admin') {
+      const allAdmins = await prisma.user.findMany({ where: { role: 'admin' } });
+      for (const adm of allAdmins) {
+        if (adm.password && await bcrypt.compare(cleanPassword, adm.password)) {
+          adminUser = adm;
+          break;
+        }
+      }
+    }
 
     if (!adminUser) return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
 
@@ -2968,6 +2979,8 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
 });
 
 app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('file'), async (req, res) => {
+  if (req.setTimeout) req.setTimeout(600000);
+  if (res.setTimeout) res.setTimeout(600000);
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded or invalid file format' });
   }

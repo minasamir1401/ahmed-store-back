@@ -807,18 +807,12 @@ async function importProductsFromExcel(filePath, prismaClient) {
     brandCache.set(b.name.toLowerCase(), b);
   }
 
-  let importedCount = 0;
-  let updatedCount = 0;
-  const touchedCategoryIds = new Set();
-
+  // Pre-seed any new categories and brands up-front
   for (const item of parsedProducts) {
-    // 1. Resolve Category
     const categoryName = item.category || 'فيتامينات ومعادن';
     const catKey = categoryName.toLowerCase();
-    let category = categoryCache.get(catKey);
-
-    if (!category) {
-      category = await prisma.category.upsert({
+    if (!categoryCache.has(catKey)) {
+      const cat = await prisma.category.upsert({
         where: { name: categoryName },
         update: {},
         create: {
@@ -827,17 +821,13 @@ async function importProductsFromExcel(filePath, prismaClient) {
           count: 0
         }
       });
-      categoryCache.set(catKey, category);
+      categoryCache.set(catKey, cat);
     }
-    touchedCategoryIds.add(category.id);
 
-    // 2. Resolve Brand
     const brandName = item.brand || 'Other';
     const brandKey = brandName.toLowerCase();
-    let brand = brandCache.get(brandKey);
-
-    if (!brand) {
-      brand = await prisma.brand.upsert({
+    if (!brandCache.has(brandKey)) {
+      const b = await prisma.brand.upsert({
         where: { name: brandName },
         update: {},
         create: {
@@ -845,125 +835,154 @@ async function importProductsFromExcel(filePath, prismaClient) {
           nameEn: brandName
         }
       });
-      brandCache.set(brandKey, brand);
+      brandCache.set(brandKey, b);
     }
+  }
 
-    // 3. Find Existing Product
-    let existingProduct = await prisma.product.findFirst({
-      where: {
-        OR: [
-          { title: item.title },
-          ...(item.titleEn ? [{ titleEn: item.titleEn }] : [])
-        ]
-      }
-    });
+  // Pre-fetch all products into in-memory maps to avoid N round-trip queries
+  const existingProducts = await prisma.product.findMany({
+    select: { id: true, title: true, titleEn: true }
+  });
+  const productByTitle = new Map();
+  const productByTitleEn = new Map();
+  for (const p of existingProducts) {
+    if (p.title) productByTitle.set(p.title.trim().toLowerCase(), p.id);
+    if (p.titleEn) productByTitleEn.set(p.titleEn.trim().toLowerCase(), p.id);
+  }
 
-    const updatePayload = {
-      title: item.title,
-      titleEn: item.titleEn || undefined,
-      categoryId: category.id,
-      brandId: brand ? brand.id : undefined,
-      price: item.price !== null ? item.price : undefined,
-      oldPrice: item.oldPrice !== null ? item.oldPrice : undefined,
-      discountType: item.discountType || undefined,
-      discountValue: item.discountValue !== null ? item.discountValue : undefined,
-      expiryDate: item.expiryDate || undefined,
-      desc: item.desc || undefined,
-      descEn: item.descEn || undefined,
-      features: item.features || undefined,
-      featuresEn: item.featuresEn || undefined,
-      usage: item.usage || undefined,
-      usageEn: item.usageEn || undefined,
-      warnings: item.warnings || undefined,
-      warningsEn: item.warningsEn || undefined,
-      ingredients: item.ingredients || undefined,
-      ingredientsEn: item.ingredientsEn || undefined,
-      disclaimer: item.disclaimer || undefined,
-      disclaimerEn: item.disclaimerEn || undefined,
-      supplementFacts: item.supplementFacts || undefined,
-      specifications: item.specifications || undefined,
-      certifications: item.certifications || undefined,
-      dosageCalculator: item.dosageCalculator || undefined,
-      faqs: item.faqs || undefined,
-      keyInfo: item.keyInfo || undefined,
-      seoKeywords: item.seoKeywords || undefined,
-      seoKeywordsEn: item.seoKeywordsEn || undefined,
-      seoDesc: item.seoDesc || undefined,
-      seoDescEn: item.seoDescEn || undefined,
-      sizes: item.sizes || undefined,
-      sizeOptions: item.sizeOptions || undefined
-    };
+  let importedCount = 0;
+  let updatedCount = 0;
+  const touchedCategoryIds = new Set();
 
-    if (item.image) {
-      updatePayload.image = item.image;
-    }
-    if (item.imageAlt) {
-      updatePayload.imageAlt = item.imageAlt;
-    }
-    if (item.backImage) {
-      updatePayload.images = JSON.stringify([item.backImage]);
-    }
+  // Process rows in concurrent batches for maximum throughput without overwhelming connection pool
+  const BATCH_SIZE = 15;
+  for (let i = 0; i < parsedProducts.length; i += BATCH_SIZE) {
+    const batch = parsedProducts.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.map(async (item) => {
+        const categoryName = item.category || 'فيتامينات ومعادن';
+        const category = categoryCache.get(categoryName.toLowerCase());
+        if (category) touchedCategoryIds.add(category.id);
 
-    if (existingProduct) {
-      await prisma.product.update({
-        where: { id: existingProduct.id },
-        data: updatePayload
-      });
-      updatedCount++;
-    } else {
-      const fallbackImage = item.image || category.image || 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=600&q=80';
-      await prisma.product.create({
-        data: {
+        const brandName = item.brand || 'Other';
+        const brand = brandCache.get(brandName.toLowerCase());
+
+        const tKey = (item.title || '').trim().toLowerCase();
+        const teKey = (item.titleEn || '').trim().toLowerCase();
+        const existingId = (tKey && productByTitle.get(tKey)) || (teKey && productByTitleEn.get(teKey));
+
+        const updatePayload = {
           title: item.title,
-          titleEn: item.titleEn || null,
-          desc: item.desc || null,
-          descEn: item.descEn || null,
-          features: item.features || null,
-          featuresEn: item.featuresEn || null,
-          usage: item.usage || null,
-          usageEn: item.usageEn || null,
-          warnings: item.warnings || null,
-          warningsEn: item.warningsEn || null,
-          ingredients: item.ingredients || null,
-          ingredientsEn: item.ingredientsEn || null,
-          disclaimer: item.disclaimer || null,
-          disclaimerEn: item.disclaimerEn || null,
-          supplementFacts: item.supplementFacts || null,
-          specifications: item.specifications || null,
-          certifications: item.certifications || null,
-          dosageCalculator: item.dosageCalculator || null,
-          faqs: item.faqs || null,
-          keyInfo: item.keyInfo || null,
-          sizeOptions: item.sizeOptions || null,
-          seoKeywords: item.seoKeywords || null,
-          seoKeywordsEn: item.seoKeywordsEn || null,
-          seoDesc: item.seoDesc || null,
-          seoDescEn: item.seoDescEn || null,
-          price: item.price !== null ? item.price : 0,
-          oldPrice: item.oldPrice !== null ? item.oldPrice : null,
-          discountType: item.discountType || null,
-          discountValue: item.discountValue !== null ? item.discountValue : null,
-          sizes: item.sizes || null,
-          expiryDate: item.expiryDate || null,
-          image: fallbackImage,
-          images: item.backImage ? JSON.stringify([item.backImage]) : null,
-          imageAlt: item.imageAlt || null,
-          categoryId: category.id,
-          brandId: brand ? brand.id : null
+          titleEn: item.titleEn || undefined,
+          categoryId: category ? category.id : undefined,
+          brandId: brand ? brand.id : undefined,
+          price: item.price !== null ? item.price : undefined,
+          oldPrice: item.oldPrice !== null ? item.oldPrice : undefined,
+          discountType: item.discountType || undefined,
+          discountValue: item.discountValue !== null ? item.discountValue : undefined,
+          expiryDate: item.expiryDate || undefined,
+          desc: item.desc || undefined,
+          descEn: item.descEn || undefined,
+          features: item.features || undefined,
+          featuresEn: item.featuresEn || undefined,
+          usage: item.usage || undefined,
+          usageEn: item.usageEn || undefined,
+          warnings: item.warnings || undefined,
+          warningsEn: item.warningsEn || undefined,
+          ingredients: item.ingredients || undefined,
+          ingredientsEn: item.ingredientsEn || undefined,
+          disclaimer: item.disclaimer || undefined,
+          disclaimerEn: item.disclaimerEn || undefined,
+          supplementFacts: item.supplementFacts || undefined,
+          specifications: item.specifications || undefined,
+          certifications: item.certifications || undefined,
+          dosageCalculator: item.dosageCalculator || undefined,
+          faqs: item.faqs || undefined,
+          keyInfo: item.keyInfo || undefined,
+          seoKeywords: item.seoKeywords || undefined,
+          seoKeywordsEn: item.seoKeywordsEn || undefined,
+          seoDesc: item.seoDesc || undefined,
+          seoDescEn: item.seoDescEn || undefined,
+          sizes: item.sizes || undefined,
+          sizeOptions: item.sizeOptions || undefined
+        };
+
+        if (item.image) {
+          updatePayload.image = item.image;
         }
-      });
-      importedCount++;
-    }
+        if (item.imageAlt) {
+          updatePayload.imageAlt = item.imageAlt;
+        }
+        if (item.backImage) {
+          updatePayload.images = JSON.stringify([item.backImage]);
+        }
+
+        if (existingId) {
+          await prisma.product.update({
+            where: { id: existingId },
+            data: updatePayload
+          });
+          updatedCount++;
+        } else {
+          const fallbackImage = item.image || (category && category.image) || 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=600&q=80';
+          const created = await prisma.product.create({
+            data: {
+              title: item.title,
+              titleEn: item.titleEn || null,
+              desc: item.desc || null,
+              descEn: item.descEn || null,
+              features: item.features || null,
+              featuresEn: item.featuresEn || null,
+              usage: item.usage || null,
+              usageEn: item.usageEn || null,
+              warnings: item.warnings || null,
+              warningsEn: item.warningsEn || null,
+              ingredients: item.ingredients || null,
+              ingredientsEn: item.ingredientsEn || null,
+              disclaimer: item.disclaimer || null,
+              disclaimerEn: item.disclaimerEn || null,
+              supplementFacts: item.supplementFacts || null,
+              specifications: item.specifications || null,
+              certifications: item.certifications || null,
+              dosageCalculator: item.dosageCalculator || null,
+              faqs: item.faqs || null,
+              keyInfo: item.keyInfo || null,
+              sizeOptions: item.sizeOptions || null,
+              seoKeywords: item.seoKeywords || null,
+              seoKeywordsEn: item.seoKeywordsEn || null,
+              seoDesc: item.seoDesc || null,
+              seoDescEn: item.seoDescEn || null,
+              price: item.price !== null ? item.price : 0,
+              oldPrice: item.oldPrice !== null ? item.oldPrice : null,
+              discountType: item.discountType || null,
+              discountValue: item.discountValue !== null ? item.discountValue : null,
+              sizes: item.sizes || null,
+              expiryDate: item.expiryDate || null,
+              image: fallbackImage,
+              images: item.backImage ? JSON.stringify([item.backImage]) : null,
+              imageAlt: item.imageAlt || null,
+              categoryId: category ? category.id : undefined,
+              brandId: brand ? brand.id : null
+            }
+          });
+          if (tKey) productByTitle.set(tKey, created.id);
+          if (teKey) productByTitleEn.set(teKey, created.id);
+          importedCount++;
+        }
+      })
+    );
   }
 
-  // Update counts for touched categories
-  for (const catId of touchedCategoryIds) {
-    const count = await prisma.product.count({ where: { categoryId: catId } });
-    await prisma.category.update({
-      where: { id: catId },
-      data: { count }
-    });
-  }
+  // Update counts for touched categories in parallel
+  await Promise.all(
+    Array.from(touchedCategoryIds).map(async (catId) => {
+      const count = await prisma.product.count({ where: { categoryId: catId } });
+      await prisma.category.update({
+        where: { id: catId },
+        data: { count }
+      });
+    })
+  );
 
   return {
     totalRows: parsedProducts.length,
