@@ -782,9 +782,11 @@ function parseGenericSheet(rawRows, normalizedHeaders) {
   return products;
 }
 
-async function importProductsFromExcel(filePath, prismaClient) {
+async function importProductsFromExcel(filePath, prismaClient, { onProgress, signal } = {}) {
+  signal?.throwIfAborted();
   const prisma = prismaClient || new (require('@prisma/client').PrismaClient)();
   const parsedProducts = parseProductsFromWorkbook(filePath);
+  onProgress?.({ totalRows: parsedProducts.length, processedCount: 0, importedCount: 0, updatedCount: 0 });
   if (parsedProducts.length === 0) {
     return {
       totalRows: 0,
@@ -809,6 +811,7 @@ async function importProductsFromExcel(filePath, prismaClient) {
 
   // Pre-seed any new categories and brands up-front
   for (const item of parsedProducts) {
+    signal?.throwIfAborted();
     const categoryName = item.category || 'فيتامينات ومعادن';
     const catKey = categoryName.toLowerCase();
     if (!categoryCache.has(catKey)) {
@@ -857,8 +860,9 @@ async function importProductsFromExcel(filePath, prismaClient) {
   // Process rows in concurrent batches for maximum throughput without overwhelming connection pool
   const BATCH_SIZE = 15;
   for (let i = 0; i < parsedProducts.length; i += BATCH_SIZE) {
+    signal?.throwIfAborted();
     const batch = parsedProducts.slice(i, i + BATCH_SIZE);
-    await Promise.all(
+    const outcomes = await Promise.allSettled(
       batch.map(async (item) => {
         const categoryName = item.category || 'فيتامينات ومعادن';
         const category = categoryCache.get(categoryName.toLowerCase());
@@ -971,6 +975,10 @@ async function importProductsFromExcel(filePath, prismaClient) {
         }
       })
     );
+    // Finish in-flight writes before stopping or removing the uploaded file.
+    const failure = outcomes.find(outcome => outcome.status === 'rejected');
+    if (failure) throw failure.reason;
+    onProgress?.({ totalRows: parsedProducts.length, processedCount: i + batch.length, importedCount, updatedCount });
   }
 
   // Update counts for touched categories in parallel

@@ -1,5 +1,4 @@
 const { Resend } = require('resend');
-const nodemailer = require('nodemailer');
 
 async function getSetting(prisma, key, defaultValue) {
   try {
@@ -11,6 +10,31 @@ async function getSetting(prisma, key, defaultValue) {
   }
 }
 
+async function resolveEmailSettings(prisma, overrides = {}, savedSettings) {
+  const defaults = {
+    resend_api_key: process.env.RESEND_API_KEY || '',
+    from_email: process.env.RESEND_FROM_EMAIL || 'orders@the-vitahub.com',
+    from_name: process.env.RESEND_FROM_NAME || 'The VitaHub',
+    admin_notification_email: process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com',
+  };
+  const stored = savedSettings || (prisma
+    ? Object.fromEntries((await prisma.setting.findMany({ where: { key: { in: Object.keys(defaults) } } })).map(row => [row.key, row.value]))
+    : {});
+  const settings = {};
+  for (const key of Object.keys(defaults)) {
+    const isSecret = key === 'resend_api_key';
+    const isMasked = value => isSecret && typeof value === 'string' && value.trim().startsWith('***');
+    const override = overrides[key];
+    if (override != null && !['string', 'number', 'boolean'].includes(typeof override)) {
+      throw Object.assign(new Error('إعدادات البريد الإلكتروني غير صالحة.'), { code: 'EMAIL_SETTINGS_INVALID' });
+    }
+    // Omitted/masked secrets retain server credentials; an explicit blank disables them.
+    const value = override != null && !isMasked(override) ? override : stored[key];
+    settings[key] = String(value == null || isMasked(value) ? defaults[key] : value).trim();
+  }
+  return settings;
+}
+
 function htmlToPlainText(html) {
   if (!html) return '';
   return html
@@ -20,42 +44,6 @@ function htmlToPlainText(html) {
     .replace(/&nbsp;/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-async function sendViaSmtp({ host, port, secure, user, pass, fromEmail, fromName, to, subject, html, replyTo }) {
-  if (!host || !user || !pass) {
-    throw new Error('SMTP host, user, and password are required');
-  }
-
-  const portNum = Number(port) || 465;
-  const isSecure = String(secure) === 'true' || portNum === 465;
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port: portNum,
-    secure: isSecure,
-    auth: {
-      user,
-      pass
-    }
-  });
-
-  const senderAddress = fromEmail || user;
-  const senderDisplayName = fromName || 'The VitaHub';
-  const from = `"${senderDisplayName}" <${senderAddress}>`;
-  const recipients = Array.isArray(to) ? to.join(', ') : to;
-  const plainText = htmlToPlainText(html);
-
-  const info = await transporter.sendMail({
-    from,
-    to: recipients,
-    replyTo: replyTo || 'the.vitaminshub@gmail.com',
-    subject,
-    text: plainText,
-    html
-  });
-
-  return { id: info.messageId, provider: 'smtp' };
 }
 
 async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, replyTo }) {
@@ -84,7 +72,7 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, r
     });
 
     if (error) {
-      throw new Error(error.message || 'Resend SDK error');
+      throw Object.assign(new Error(error.message || 'Resend SDK error'), { code: error.name, statusCode: error.statusCode });
     }
     return { ...data, provider: 'resend' };
   } catch (sdkError) {
@@ -114,62 +102,19 @@ async function sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, r
 }
 
 async function dispatchEmail(prisma, { to, subject, html, settingsOverride = null, context = 'email' }) {
-  const apiKey = settingsOverride?.resend_api_key || process.env.RESEND_API_KEY || (prisma ? await getSetting(prisma, 'resend_api_key', '') : '');
-  const smtpHost = settingsOverride?.smtp_host || (prisma ? await getSetting(prisma, 'smtp_host', process.env.SMTP_HOST || '') : process.env.SMTP_HOST || '');
-  const smtpPort = settingsOverride?.smtp_port || (prisma ? await getSetting(prisma, 'smtp_port', process.env.SMTP_PORT || '465') : process.env.SMTP_PORT || '465');
-  const smtpSecure = settingsOverride?.smtp_secure || (prisma ? await getSetting(prisma, 'smtp_secure', process.env.SMTP_SECURE || 'true') : process.env.SMTP_SECURE || 'true');
-  const smtpUser = settingsOverride?.smtp_user || (prisma ? await getSetting(prisma, 'smtp_user', process.env.SMTP_USER || '') : process.env.SMTP_USER || '');
-  const smtpPass = settingsOverride?.smtp_pass || (prisma ? await getSetting(prisma, 'smtp_pass', process.env.SMTP_PASS || '') : process.env.SMTP_PASS || '');
-  const fromEmail = settingsOverride?.from_email || (prisma ? await getSetting(prisma, 'from_email', process.env.RESEND_FROM_EMAIL || 'orders@the-vitahub.com') : 'orders@the-vitahub.com');
-  const fromName = settingsOverride?.from_name || (prisma ? await getSetting(prisma, 'from_name', process.env.RESEND_FROM_NAME || 'The VitaHub') : 'The VitaHub');
+  const settings = await resolveEmailSettings(prisma, settingsOverride || {});
+  const {
+    resend_api_key: apiKey,
+    from_email: fromEmail,
+    from_name: fromName,
+    admin_notification_email: adminEmail,
+  } = settings;
 
-  const isSmtpConfigured = Boolean(smtpHost && smtpHost !== 'smtp.resend.com' && smtpUser && smtpPass);
-
-  const adminEmail = settingsOverride?.admin_notification_email || (prisma ? await getSetting(prisma, 'admin_notification_email', process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com') : 'the.vitaminshub@gmail.com');
-
-  if (apiKey) {
-    try {
-      const result = await sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, replyTo: adminEmail });
-      return result;
-    } catch (resendError) {
-      console.warn(`[${context}] Resend dispatch failed: ${resendError.message}`);
-      if (isSmtpConfigured) {
-        console.log(`[${context}] Automatically falling back to SMTP delivery...`);
-        return await sendViaSmtp({
-          host: smtpHost,
-          port: smtpPort,
-          secure: smtpSecure,
-          user: smtpUser,
-          pass: smtpPass,
-          fromEmail,
-          fromName,
-          to,
-          subject,
-          html,
-          replyTo: adminEmail
-        });
-      }
-      throw resendError;
-    }
+  if (!apiKey) {
+    throw Object.assign(new Error('لم يتم ضبط مفتاح Resend API. يرجى إدخال مفتاح Resend في إعدادات النظام.'), { code: 'EMAIL_CONFIG' });
   }
 
-  if (isSmtpConfigured) {
-    return await sendViaSmtp({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpSecure,
-      user: smtpUser,
-      pass: smtpPass,
-      fromEmail,
-      fromName,
-      to,
-      subject,
-      html,
-      replyTo: adminEmail
-    });
-  }
-
-  throw new Error('لم يتم ضبط وسيلة إرسال بريد إلكتروني صالحة (يرجى إدخال مفتاح Resend API أو إعدادات خادم SMTP)');
+  return await sendViaResend({ apiKey, fromEmail, fromName, to, subject, html, replyTo: adminEmail });
 }
 
 async function sendOrderConfirmationEmail(prisma, order, language = 'ar') {
@@ -616,6 +561,7 @@ async function sendTestEmail(settings, toEmail) {
 }
 
 module.exports = {
+  resolveEmailSettings,
   sendOrderConfirmationEmail,
   sendAdminOrderNotificationEmail,
   sendTestEmail

@@ -402,7 +402,7 @@ prisma.$connect()
         const exists = await prisma.setting.findUnique({ where: { key: setting.key } });
         if (!exists) {
           await prisma.setting.create({ data: setting });
-          console.log(`Seeded default setting: ${setting.key} = ${setting.value}`);
+          console.log(`Seeded default setting: ${setting.key}`);
         }
       }
     } catch (err) {
@@ -617,10 +617,10 @@ const backupUpload = multer({
 const excelUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
-      cb(null, path.join(__dirname, 'uploads'));
+      cb(null, require('node:os').tmpdir());
     },
     filename: (req, file, cb) => {
-      cb(null, `import-${Date.now()}-${file.originalname}`);
+      cb(null, `vitahub-import-${crypto.randomUUID()}.xlsx`);
     }
   }),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -630,7 +630,7 @@ const excelUpload = multer({
     if (ext === '.xlsx' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mime === 'application/octet-stream') {
       return cb(null, true);
     }
-    return cb(new Error('Only Excel (.xlsx) files are allowed.'));
+    return cb(Object.assign(new Error('يرجى اختيار ملف Excel بصيغة .xlsx.'), { status: 400 }));
   }
 });
 
@@ -2075,7 +2075,14 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
 async function getSetting(tx, key, defaultValue) {
   try {
     const setting = await tx.setting.findUnique({ where: { key } });
-    return setting ? setting.value : defaultValue;
+    if (!setting || setting.value === null || setting.value === undefined || setting.value === '') {
+      return defaultValue;
+    }
+    // Never return masked secret values to internal services
+    if (key === 'resend_api_key' && setting.value.startsWith('***')) {
+      return defaultValue;
+    }
+    return setting.value;
   } catch (err) {
     return defaultValue;
   }
@@ -2107,20 +2114,14 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
     const allRows = await prisma.setting.findMany();
     const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
-    if (!settings.resend_api_key) settings.resend_api_key = process.env.RESEND_API_KEY || '';
-    if (!settings.smtp_host) settings.smtp_host = 'smtp.resend.com';
-    if (!settings.smtp_port) settings.smtp_port = '465';
-    if (!settings.smtp_secure) settings.smtp_secure = 'true';
-    if (!settings.smtp_user) settings.smtp_user = 'resend';
-    if (!settings.smtp_pass) settings.smtp_pass = settings.resend_api_key;
-    if (!settings.from_email) settings.from_email = 'orders@the-vitahub.com';
-    if (!settings.from_name) settings.from_name = 'The VitaHub';
+    const { resolveEmailSettings } = require('./src/services/emailService');
+    Object.assign(settings, await resolveEmailSettings(null, {}, settings));
     if (!settings.whatsapp_number) settings.whatsapp_number = '01201450111';
     if (!settings.receiving_number) settings.receiving_number = '01009596452';
     if (!settings.admin_notification_email) settings.admin_notification_email = process.env.ADMIN_NOTIFICATION_EMAIL || 'the.vitaminshub@gmail.com';
 
     // Mask sensitive keys — show only last 4 chars
-    const SENSITIVE_KEYS = ['resend_api_key', 'smtp_pass'];
+    const SENSITIVE_KEYS = ['resend_api_key'];
     for (const key of SENSITIVE_KEYS) {
       if (settings[key] && settings[key].length > 4) {
         settings[key] = `***${settings[key].slice(-4)}`;
@@ -2137,7 +2138,7 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
 });
 
 const ALLOWED_SETTINGS_KEYS = new Set([
-  'resend_api_key', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass',
+  'resend_api_key',
   'from_email', 'from_name', 'whatsapp_number', 'receiving_number',
   'shipping_rates', 'return_policy', 'admin_notification_email'
 ]);
@@ -2151,7 +2152,12 @@ app.post('/api/admin/settings', adminAuthenticate, async (req, res) => {
     }
     for (const [key, value] of entries) {
       if (value !== undefined && value !== null) {
-        await setSetting(prisma, key, String(value).slice(0, 2000));
+        const strVal = String(value).trim();
+        // Skip masked values so existing secrets are never destroyed
+        if (key === 'resend_api_key' && strVal.startsWith('***')) {
+          continue;
+        }
+        await setSetting(prisma, key, strVal.slice(0, 2000));
       }
     }
     res.json({ message: 'تم حفظ الإعدادات بنجاح' });
@@ -2299,35 +2305,32 @@ app.get('/api/admin/pixel-events', adminAuthenticate, async (req, res) => {
 });
 
 app.post('/api/admin/settings/test-email', adminAuthenticate, async (req, res) => {
-  const { to } = req.body;
-  if (!to) return res.status(400).json({ error: 'البريد الإلكتروني للمستلم مطلوب' });
+  const to = typeof req.body?.to === 'string' ? req.body.to.trim() : '';
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(to) || to.length > 254) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صالح للمستلم.' });
+  }
+  const overrides = req.body?.settings;
+  if (overrides != null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
+    return res.status(400).json({ error: 'إعدادات البريد الإلكتروني غير صالحة.' });
+  }
   try {
-    const keys = [
-      'resend_api_key', 'from_email', 'from_name',
-      'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass'
-    ];
-    const settings = {};
-    for (const key of keys) {
-      let def = '';
-      if (key === 'resend_api_key') def = process.env.RESEND_API_KEY || '';
-      if (key === 'from_email') def = 'orders@the-vitahub.com';
-      if (key === 'from_name') def = 'The VitaHub';
-      settings[key] = await getSetting(prisma, key, def);
-    }
-    const { sendTestEmail } = require('./src/services/emailService');
+    const { resolveEmailSettings, sendTestEmail } = require('./src/services/emailService');
+    const settings = await resolveEmailSettings(prisma, overrides || {});
     const result = await sendTestEmail(settings, to);
     res.json({ message: `تم إرسال البريد الإلكتروني بنجاح [${result.provider || 'email'}]`, result });
   } catch (error) {
     console.error('Test email error:', error);
-    let msg = error.message || 'حدث خطأ أثناء إرسال البريد التجريبي';
-    if (error.code === 'EAUTH' || msg.includes('BadCredentials') || msg.includes('Invalid login')) {
-      msg = 'فشل تسجيل الدخول في Gmail SMTP: يرجى التأكد من استخدام "كلمة مرور التطبيقات" (App Password) المكونة من 16 حرفاً من إعدادات أمان حساب Google، وليس كلمة المرور العادية للحساب.';
-    } else if (msg.includes('only send testing emails') || msg.includes('domain is not verified') || msg.includes('verify your domain')) {
-      msg = 'تنبيه منصة Resend: نطاق المتجر (the-vitahub.com) لم يتم توثيقه بعد في لوحة تحكم resend.com/domains بإضافة سجلات الـ DNS (SPF / DKIM). في الوضع التجريبي تمنع Resend الإرسال لأي بريد خارجي حتى يتم توثيق الدومين. للإرسال الفوري دون انتظار توثيق النطاق، يمكنك استخدام خيار Gmail SMTP المتاح بالأسفل مع App Password.';
-    } else if (msg.includes('API key is invalid') || msg.includes('resend')) {
-      msg = 'فشل الإرسال عبر Resend: يرجى التحقق من مفتاح Resend API Key وتوثيق النطاق الخاص بك.';
+    let msg = error.message || 'حدث خطأ أثناء إرسال البريد التجريبي عبر Resend';
+    if (msg.includes('only send testing emails') || msg.includes('domain is not verified') || msg.includes('verify your domain')) {
+      msg = 'تنبيه منصة Resend: نطاق المتجر (the-vitahub.com) لم يتم توثيقه بعد في لوحة تحكم resend.com/domains بإضافة سجلات الـ DNS (SPF / DKIM). في الوضع التجريبي تمنع Resend الإرسال لأي بريد خارجي حتى يتم توثيق الدومين.';
+    } else if (msg.includes('API key is invalid') || msg.includes('resend') || error.code === 'EMAIL_CONFIG') {
+      msg = 'فشل الإرسال عبر Resend: يرجى التحقق من صحة مفتاح Resend API Key وتوثيق النطاق الخاص بك.';
     }
-    res.status(400).json({ error: msg });
+    const status = error.code === 'ETIMEDOUT' ? 504
+      : ['ENOTFOUND', 'EAI_AGAIN', 'ECONNECTION', 'ESOCKET'].includes(error.code) ? 502
+      : ['EMAIL_CONFIG', 'EMAIL_SETTINGS_INVALID', 'EENVELOPE'].includes(error.code) || (error.statusCode >= 400 && error.statusCode < 500) ? 400
+      : error.code?.startsWith('P') ? 500 : 502;
+    res.status(status).json({ error: msg, code: error.code || 'EMAIL_DELIVERY_FAILED' });
   }
 });
 
@@ -2988,37 +2991,57 @@ app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('fi
   }
 
   const filePath = req.file.path;
+  const streaming = req.get('accept')?.includes('application/x-ndjson');
+  const controller = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) controller.abort(new Error('انقطع اتصال الاستيراد. راجع المنتجات المحفوظة قبل إعادة المحاولة.'));
+  };
+  res.on('close', onClose);
+  const writeEvent = event => {
+    if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
+  };
+  let heartbeat;
+  if (streaming) {
+    // Keep proxy connections active while database batches are being processed.
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    writeEvent({ type: 'started' });
+    heartbeat = setInterval(() => writeEvent({ type: 'heartbeat' }), 15000);
+  }
 
   try {
     const { importProductsFromExcel } = require('./src/services/excelImportService');
-    const result = await importProductsFromExcel(filePath, prisma);
-
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    } catch (unlinkErr) {
-      console.error('Failed to delete uploaded temp file:', unlinkErr);
-    }
-
-    invalidateCatalogCache();
-
-    res.json({
+    const result = await importProductsFromExcel(filePath, prisma, {
+      signal: controller.signal,
+      onProgress: streaming ? progress => writeEvent({ type: 'progress', ...progress }) : undefined,
+    });
+    const payload = {
       success: true,
       message: result.message,
       totalRows: result.totalRows,
       importedCount: result.importedCount,
       updatedCount: result.updatedCount
-    });
+    };
+    if (!res.destroyed) {
+      if (streaming) res.end(`${JSON.stringify({ type: 'result', ...payload })}\n`);
+      else res.json(payload);
+    }
   } catch (err) {
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    } catch (_) {}
-
     console.error('Import Excel error:', err);
-    res.status(500).json({ error: err.message || 'Failed to process Excel file' });
+    if (!res.destroyed) {
+      const error = `${err.message || 'تعذر معالجة ملف Excel.'} قد تكون بعض المنتجات قد حُفظت؛ راجع القائمة قبل إعادة الاستيراد.`;
+      if (streaming) res.end(`${JSON.stringify({ type: 'error', error })}\n`);
+      else res.status(500).json({ error });
+    }
+  } finally {
+    clearInterval(heartbeat);
+    res.off('close', onClose);
+    invalidateCatalogCache();
+    await fs.promises.unlink(filePath).catch(error => {
+      if (error.code !== 'ENOENT') console.error('Failed to delete uploaded temp file:', error);
+    });
   }
 });
 
@@ -3990,10 +4013,10 @@ app.get('/api/debug-images', adminAuthenticate, async (req, res) => {
 app.use((err, req, res, next) => {
   const reqId = crypto.randomBytes(4).toString('hex');
   console.error(`[ERR:${reqId}]`, err);
-  const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
+  const status = err.status || (err.type === 'entity.too.large' || err.code === 'LIMIT_FILE_SIZE' ? 413 : 500);
   // Never expose internal error details to the client
   const userMessage = status < 500
-    ? (err.message || 'طلب غير صالح')
+    ? (err.code === 'LIMIT_FILE_SIZE' ? 'حجم الملف يتجاوز الحد المسموح للرفع.' : err.message || 'طلب غير صالح')
     : 'حدث خطأ في الخادم';
   res.status(status).json({ error: userMessage, requestId: reqId });
 });
