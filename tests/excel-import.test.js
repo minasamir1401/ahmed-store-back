@@ -281,7 +281,7 @@ test('the actual upload filter accepts supported extensions but not arbitrary oc
     });
   }
   context.options.fileFilter({}, { originalname: 'products.pdf', mimetype: 'application/octet-stream' }, error => assert.equal(error.status, 400));
-  assert.equal(context.options.limits.fileSize, 50 * 1024 * 1024);
+  assert.equal(context.options.limits.fileSize, 200 * 1024 * 1024);
 });
 
 test('the real HTTP routes accept the upload, survive response closure and isolate status by admin', { timeout: 10000 }, async t => {

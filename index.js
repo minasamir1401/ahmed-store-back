@@ -623,7 +623,7 @@ const excelUpload = multer({
       cb(null, `vitahub-import-${crypto.randomUUID()}${path.extname(file.originalname.trim()).toLowerCase()}`);
     }
   }),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 200 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = file.originalname ? path.extname(file.originalname.trim()).toLowerCase() : '';
     if (['.xlsx', '.xls', '.xlsm', '.csv'].includes(ext)) {
