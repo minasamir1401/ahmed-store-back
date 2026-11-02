@@ -620,17 +620,16 @@ const excelUpload = multer({
       cb(null, require('node:os').tmpdir());
     },
     filename: (req, file, cb) => {
-      cb(null, `vitahub-import-${crypto.randomUUID()}.xlsx`);
+      cb(null, `vitahub-import-${crypto.randomUUID()}${path.extname(file.originalname.trim()).toLowerCase()}`);
     }
   }),
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const ext = file.originalname ? path.extname(file.originalname).toLowerCase() : '';
-    const mime = file.mimetype ? file.mimetype.toLowerCase() : '';
-    if (ext === '.xlsx' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mime === 'application/octet-stream') {
+    const ext = file.originalname ? path.extname(file.originalname.trim()).toLowerCase() : '';
+    if (['.xlsx', '.xls', '.xlsm', '.csv'].includes(ext)) {
       return cb(null, true);
     }
-    return cb(Object.assign(new Error('يرجى اختيار ملف Excel بصيغة .xlsx.'), { status: 400 }));
+    return cb(Object.assign(new Error('صيغة الملف غير مدعومة. اختر ملف .xlsx أو .xls أو .xlsm أو .csv.'), { status: 400 }));
   }
 });
 
@@ -2983,14 +2982,44 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
   }
 });
 
-app.post('/api/products/import-excel', adminAuthenticate, excelUpload.single('file'), async (req, res) => {
+app.get('/api/products/import-excel/status', adminAuthenticate, async (req, res) => {
+  try {
+    const { getExcelImportJob } = require('./src/services/excelImportService');
+    const job = await getExcelImportJob(prisma, req.user.id, req.query.jobId);
+    res.setHeader('Cache-Control', 'no-store');
+    if (!job) return res.status(404).json({ error: 'لم يتم العثور على عملية الاستيراد لهذا الحساب.' });
+    res.json(job);
+  } catch (error) {
+    sendSafeError(res, error, 'تعذر قراءة حالة الاستيراد.');
+  }
+});
+
+app.post('/api/products/import-excel', adminAuthenticate, (req, res, next) => {
   if (req.setTimeout) req.setTimeout(600000);
   if (res.setTimeout) res.setTimeout(600000);
+  next();
+}, excelUpload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded or invalid file format' });
   }
 
   const filePath = req.file.path;
+  if (req.query.async === '1') {
+    try {
+      const jobId = req.query.jobId;
+      if (typeof jobId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(jobId)) {
+        throw Object.assign(new Error('معرّف عملية الاستيراد غير صالح.'), { status: 400 });
+      }
+      const { startExcelImportJob } = require('./src/services/excelImportService');
+      const job = await startExcelImportJob(filePath, prisma, { ownerId: req.user.id, jobId, onComplete: invalidateCatalogCache });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(202).json(job);
+    } catch (error) {
+      await fs.promises.unlink(filePath).catch(() => {});
+      if (error.status === 409) return res.status(409).json({ error: error.message, jobId: error.jobId });
+      return sendSafeError(res, error, 'تعذر بدء استيراد الملف.');
+    }
+  }
   const streaming = req.get('accept')?.includes('application/x-ndjson');
   const controller = new AbortController();
   const onClose = () => {

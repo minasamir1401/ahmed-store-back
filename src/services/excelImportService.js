@@ -1,4 +1,8 @@
 const XLSX = require('xlsx');
+const fs = require('node:fs');
+
+const IMPORT_JOB_TIMEOUT = 10 * 60 * 1000;
+const interruptedJobMessage = 'انقطع تنفيذ الاستيراد قبل تأكيد النتيجة النهائية. قد تكون بعض المنتجات قد حُفظت؛ راجع القائمة قبل إعادة الاستيراد.';
 
 function normalizeHeader(str) {
   if (!str) return '';
@@ -380,13 +384,14 @@ function buildSpecifications(specs) {
 }
 
 function parseProductsFromWorkbook(filePath) {
-  const wb = XLSX.readFile(filePath);
+  const wb = XLSX.readFile(filePath, { sheets: 0 });
   const firstSheetName = wb.SheetNames[0];
   const sheet = wb.Sheets[firstSheetName];
 
+  if (!sheet) throw Object.assign(new Error('ملف Excel لا يحتوي على ورقة بيانات.'), { status: 400 });
   const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
   if (!rawRows || rawRows.length === 0) {
-    throw new Error('ملف Excel فارغ.');
+    throw Object.assign(new Error('ملف Excel فارغ.'), { status: 400 });
   }
 
   const headerRow = rawRows[0] || [];
@@ -599,7 +604,7 @@ function parseEnrichedSheet(rawRows, normalizedHeaders) {
       titleEn: titleEn || null,
       brand,
       category,
-      price: price !== null ? price : 0,
+      price,
       oldPrice: calculatedOldPrice,
       discountType,
       discountValue,
@@ -678,7 +683,7 @@ function parseClassicBrandSheet(rawRows) {
         titleEn: null,
         brand: resolvedBrand,
         category: detectCategory(title, '', ''),
-        price: price !== null ? price : 0,
+        price,
         oldPrice: null,
         discountType: null,
         discountValue: null,
@@ -733,7 +738,7 @@ function parseGenericSheet(rawRows, normalizedHeaders) {
     const title = titleIdx >= 0 && row[titleIdx] ? String(row[titleIdx]).trim() : '';
     if (!title) continue;
 
-    const price = priceIdx >= 0 ? parseNumber(row[priceIdx]) : 0;
+    const price = priceIdx >= 0 ? parseNumber(row[priceIdx]) : null;
     const brand = brandIdx >= 0 && row[brandIdx] ? cleanBrandName(row[brandIdx]) : 'Other';
     const desc = descIdx >= 0 && row[descIdx] ? String(row[descIdx]).trim() : null;
     const category = catIdx >= 0 && row[catIdx] ? String(row[catIdx]).trim() : detectCategory(title, '', desc || '');
@@ -745,7 +750,7 @@ function parseGenericSheet(rawRows, normalizedHeaders) {
       titleEn: null,
       brand,
       category,
-      price: price !== null ? price : 0,
+      price,
       oldPrice: null,
       discountType: null,
       discountValue: null,
@@ -786,7 +791,8 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
   signal?.throwIfAborted();
   const prisma = prismaClient || new (require('@prisma/client').PrismaClient)();
   const parsedProducts = parseProductsFromWorkbook(filePath);
-  onProgress?.({ totalRows: parsedProducts.length, processedCount: 0, importedCount: 0, updatedCount: 0 });
+  await onProgress?.({ totalRows: parsedProducts.length, processedCount: 0, importedCount: 0, updatedCount: 0 });
+  signal?.throwIfAborted();
   if (parsedProducts.length === 0) {
     return {
       totalRows: 0,
@@ -978,7 +984,8 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
     // Finish in-flight writes before stopping or removing the uploaded file.
     const failure = outcomes.find(outcome => outcome.status === 'rejected');
     if (failure) throw failure.reason;
-    onProgress?.({ totalRows: parsedProducts.length, processedCount: i + batch.length, importedCount, updatedCount });
+    await onProgress?.({ totalRows: parsedProducts.length, processedCount: i + batch.length, importedCount, updatedCount });
+    signal?.throwIfAborted();
   }
 
   // Update counts for touched categories in parallel
@@ -1000,7 +1007,98 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
   };
 }
 
+async function getExcelImportJob(prisma, ownerId, jobId) {
+  const record = await prisma.setting.findUnique({ where: { key: `excel-import:${ownerId}` } });
+  if (!record) return null;
+  const job = JSON.parse(record.value);
+  if (job.jobId !== jobId) return null;
+  if (job.status === 'running' && Date.now() - new Date(record.updatedAt).getTime() > IMPORT_JOB_TIMEOUT) {
+    return { ...job, status: 'failed', error: interruptedJobMessage };
+  }
+  return job;
+}
+
+async function startExcelImportJob(filePath, prisma, { ownerId, jobId, onComplete } = {}) {
+  const key = `excel-import:${ownerId}`;
+  const job = { jobId, status: 'running', totalRows: 0, processedCount: 0, importedCount: 0, updatedCount: 0 };
+  let savedValue = JSON.stringify(job);
+  let claimed = false;
+  for (let attempt = 0; attempt < 3 && !claimed; attempt++) {
+    const previous = await prisma.setting.findUnique({ where: { key } });
+    if (previous) {
+      const active = JSON.parse(previous.value);
+      if (active.jobId === jobId) {
+        await fs.promises.unlink(filePath);
+        return active;
+      }
+      if (active.status === 'running' && Date.now() - new Date(previous.updatedAt).getTime() <= IMPORT_JOB_TIMEOUT) {
+        await fs.promises.unlink(filePath);
+        throw Object.assign(new Error('توجد عملية استيراد أخرى قيد التنفيذ. لم يتم استيراد الملف الجديد؛ انتظر اكتمال العملية السابقة.'), { status: 409, jobId: active.jobId });
+      }
+      // Compare-and-swap prevents concurrent uploads from starting duplicate jobs.
+      claimed = (await prisma.setting.updateMany({ where: { key, value: previous.value }, data: { value: savedValue } })).count === 1;
+    } else {
+      try {
+        await prisma.setting.create({ data: { key, value: savedValue } });
+        claimed = true;
+      } catch (error) {
+        if (error.code !== 'P2002') throw error;
+      }
+    }
+  }
+  if (!claimed) throw Object.assign(new Error('توجد عملية استيراد أخرى قيد البدء. انتظر اكتمالها.'), { status: 409 });
+
+  const save = async () => {
+    const value = JSON.stringify(job);
+    const result = await prisma.setting.updateMany({ where: { key, value: savedValue }, data: { value } });
+    if (result.count !== 1) throw new Error(interruptedJobMessage);
+    savedValue = value;
+  };
+
+  // The response can finish before parsing or database writes begin. Polls read durable status.
+  setImmediate(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(interruptedJobMessage)), IMPORT_JOB_TIMEOUT);
+    const heartbeat = setInterval(() => {
+      prisma.setting.updateMany({ where: { key, value: savedValue }, data: { value: savedValue } })
+        .catch(error => console.error('Excel import heartbeat error:', error));
+    }, 15000);
+    try {
+      const result = await importProductsFromExcel(filePath, prisma, {
+        signal: controller.signal,
+        onProgress: async progress => {
+          Object.assign(job, progress);
+          await save();
+        }
+      });
+      controller.signal.throwIfAborted();
+      job.status = 'completed';
+      job.result = { success: true, ...result };
+      await save();
+    } catch (error) {
+      console.error('Excel import job error:', error);
+      job.status = 'failed';
+      job.error = error.status === 400 ? error.message : interruptedJobMessage;
+      await save().catch(saveError => console.error('Excel import status error:', saveError));
+    } finally {
+      clearTimeout(timeout);
+      clearInterval(heartbeat);
+      await fs.promises.unlink(filePath).catch(error => {
+        if (error.code !== 'ENOENT') console.error('Failed to delete import file:', error);
+      });
+      try {
+        await onComplete?.();
+      } catch (error) {
+        console.error('Excel import completion error:', error);
+      }
+    }
+  });
+  return job;
+}
+
 module.exports = {
   parseProductsFromWorkbook,
-  importProductsFromExcel
+  importProductsFromExcel,
+  startExcelImportJob,
+  getExcelImportJob
 };
