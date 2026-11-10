@@ -24,7 +24,7 @@ const {
 const { serveCatalogProductImage } = require('./src/services/catalogImageService');
 const { BANNER_IMAGE_ERROR, createProductArtworkGuard, hideProductArtwork } = require('./src/services/productArtworkService');
 const { parseProductImages } = require('./src/utils/productImages');
-const { FRAME_JOB_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('./src/services/productFrameService');
+const { FRAME_JOB_KEY, FRAME_REVIEW_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('./src/services/productFrameService');
 const { retiredUploadHandler } = require('./src/utils/productFrameFiles');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -2130,7 +2130,7 @@ app.get('/api/settings', async (req, res) => {
 
 app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
   try {
-    const allRows = await prisma.setting.findMany({ where: { key: { not: FRAME_JOB_KEY } } });
+    const allRows = await prisma.setting.findMany({ where: { key: { notIn: [FRAME_JOB_KEY, FRAME_REVIEW_KEY] } } });
     const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
     const { resolveEmailSettings } = require('./src/services/emailService');
@@ -2159,6 +2159,11 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
 app.get('/api/admin/settings/product-frames', adminAuthenticate, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
+    if (req.query.reviewPage !== undefined) {
+      const page = Number(req.query.reviewPage);
+      if (!Number.isSafeInteger(page) || page < 1) return res.status(400).json({ error: 'رقم صفحة المراجعة غير صالح.' });
+      return res.json(await productFrames.review(page));
+    }
     res.json(await productFrames.status());
   } catch (error) {
     sendSafeError(res, error);
@@ -2172,7 +2177,8 @@ app.post('/api/admin/settings/product-frames', adminAuthenticate, async (req, re
     return res.status(400).json({ error: 'حدّث حالة دفعة الصور وحاول مرة أخرى.' });
   }
   try {
-    const job = await productFrames.start(revision);
+    const all = typeof req.body?.all === 'boolean' ? req.body.all : undefined;
+    const job = await productFrames.start(revision, all);
     res.status(job.status === 'running' ? 202 : 200).json(job);
   } catch (error) {
     sendSafeError(res, error);

@@ -13,10 +13,20 @@ const express = require('express');
 const multer = require('multer');
 const sharp = require('sharp');
 const { BANNER_IMAGE_ERROR, hideProductArtwork, loadProductArtwork } = require('../src/services/productArtworkService');
-const { FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('../src/services/productFrameService');
+const { FRAME_JOB_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('../src/services/productFrameService');
+const { readRemoteProductImage } = require('../src/services/productFrameSource');
 const { framedPath, readFrameAlias, retiredUploadHandler } = require('../src/utils/productFrameFiles');
 
 const database = process.env.PRODUCT_FRAME_TEST_DATABASE_URL;
+
+test('remote image redirects cannot reach an unapproved host', async () => {
+  const requests = [];
+  await assert.rejects(readRemoteProductImage('https://cdn.shopify.com/photo.png', async url => {
+    requests.push(url.href);
+    return Response.redirect('http://127.0.0.1/private', 302);
+  }), FrameSourceError);
+  assert.deepEqual(requests, ['https://cdn.shopify.com/photo.png']);
+});
 
 test('a product upload serves the merged JPEG and a general upload keeps its own format', async t => {
   const root = path.resolve(os.tmpdir());
@@ -308,4 +318,51 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   assert.equal(edited.image, '/uploads/concurrent.png');
   assert.equal(edited.images, updatedGallery);
   await fs.access(path.join(uploads, 'concurrent.png'));
+
+  const where = { key: FRAME_JOB_KEY };
+  const { reviewId, ...oldJob } = JSON.parse((await prisma.setting.findUniqueOrThrow({ where })).value);
+  await prisma.setting.update({
+    where,
+    data: { value: JSON.stringify({ ...oldJob, status: 'ready', cursor: { id: 'zz', slot: 0 }, passFailed: 600 }) },
+  });
+
+  const frontUrl = 'https://cdn.shopify.com/exact-front.png?v=1';
+  const backUrl = 'https://cdn.shopify.com/exact-back.png?v=2';
+  const unavailable = 'https://cdn.shopify.com/unavailable.png';
+  await prisma.product.createMany({ data: [
+    ...Array.from({ length: 54 }, (_, i) => ({ id: `missing-${i}`, title: `Missing photo ${i}`, price: 12, categoryId: category.id, image: '' })),
+    { id: 'z-remote', title: 'Remote photos', price: 42, categoryId: category.id, image: frontUrl, images: JSON.stringify([backUrl, unavailable]) },
+  ] });
+  const requests = [];
+  const remoteService = createProductFrameService(prisma, {
+    uploadsDir: uploads,
+    request: async url => {
+      requests.push(url.href);
+      if (url.href === unavailable) return new Response(null, { status: 404 });
+      const bytes = url.href === frontUrl
+        ? await fs.readFile(path.join(uploads, 'shared.png'))
+        : await sharp({ create: { width: 420, height: 270, channels: 3, background: '#1010fc' } }).png().toBuffer();
+      return new Response(bytes, { headers: { 'content-type': 'image/png' } });
+    },
+  });
+  const full = await remoteService.start(raced.revision, true).then(() => waitForBatch(remoteService));
+  assert.equal(full.status, 'retry');
+  assert.equal(full.passFailed, 58);
+  assert.equal(full.passAttempted, 62);
+  assert.deepEqual(requests, [frontUrl, backUrl, unavailable]);
+  const remote = await prisma.product.findUniqueOrThrow({ where: { id: 'z-remote' } });
+  const remoteGallery = JSON.parse(remote.images);
+  assert.match(remote.image, /^\/uploads\/product-frames\/v3-/);
+  assert.match(remoteGallery[0], /^\/uploads\/product-frames\/v3-/);
+  assert.notEqual(remote.image, remoteGallery[0]);
+  assert.ok((await pixel(remote.image, 569, 595))[1] > 230);
+  assert.ok((await pixel(remoteGallery[0], 569, 595))[2] > 230);
+  assert.equal(remoteGallery[1], unavailable);
+  assert.equal(remote.price, 42);
+  const firstReview = await remoteService.review(1);
+  const secondReview = await remoteService.review(2);
+  assert.equal(firstReview.entries.length, 50);
+  assert.equal(secondReview.entries.length, 8);
+  assert.equal(secondReview.recorded, full.passFailed);
+  assert.equal(new Set([...firstReview.entries, ...secondReview.entries].map(({ productId, slot }) => `${productId}:${slot}`)).size, 58);
 });
