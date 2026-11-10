@@ -10,11 +10,78 @@ const { setTimeout: delay } = require('node:timers/promises');
 const vm = require('node:vm');
 const { PrismaClient } = require('@prisma/client');
 const express = require('express');
+const multer = require('multer');
 const sharp = require('sharp');
-const { createProductFrameService } = require('../src/services/productFrameService');
+const { FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('../src/services/productFrameService');
 const { framedPath, readFrameAlias, retiredUploadHandler } = require('../src/utils/productFrameFiles');
 
 const database = process.env.PRODUCT_FRAME_TEST_DATABASE_URL;
+
+test('a product upload serves the merged JPEG and a general upload keeps its own format', async t => {
+  const root = path.resolve(os.tmpdir());
+  const directory = await fs.mkdtemp(path.join(root, 'vitahub-frame-upload-'));
+  const uploads = path.join(directory, 'uploads');
+  await fs.mkdir(uploads);
+  t.after(async () => {
+    assert.equal(path.dirname(path.resolve(directory)), root);
+    assert.match(path.basename(directory), /^vitahub-frame-upload-[a-zA-Z0-9]+$/);
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  const app = express();
+  app.use('/uploads', express.static(uploads));
+  const index = await fs.readFile(path.join(__dirname, '../index.js'), 'utf8');
+  const route = index.slice(index.indexOf("app.post('/api/upload',"), index.indexOf("app.post('/api/upload-multiple',"));
+  vm.runInNewContext(route, {
+    app, upload: multer({ storage: multer.memoryStorage() }),
+    adminAuthenticate: (_req, _res, next) => next(),
+    isAllowedImageBuffer: file => file.mimetype === 'image/png',
+    resolveImageAlt: body => body.altText,
+    optimizeImage: async file => ({ data: file.buffer, extension: 'png' }),
+    slugifyFileName: () => 'general-image',
+    crypto: { randomBytes }, fs: require('node:fs'), path, __dirname: directory,
+    FrameSourceError, frameUploadedProductImage: input => frameUploadedProductImage(input, uploads),
+  });
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const photo = await sharp({ create: { width: 400, height: 250, channels: 3, background: '#fc1010' } }).png().toBuffer();
+  const uploadImage = (input, type = '') => {
+    const form = new FormData();
+    form.set('image', new Blob([input], { type: 'image/png' }), 'sample.png');
+    form.set('altText', 'Fixture product');
+    return fetch(`${base}/api/upload${type ? `?type=${type}` : ''}`, { method: 'POST', body: form });
+  };
+
+  const response = await uploadImage(photo, 'product');
+  assert.equal(response.status, 200);
+  const image = await response.json();
+  assert.ok(framedPath(image.url, uploads));
+  assert.equal(image.altText, 'Fixture product');
+  const served = await fetch(base + image.url);
+  assert.equal(served.headers.get('content-type'), 'image/jpeg');
+  const bytes = Buffer.from(await served.arrayBuffer());
+  assert.equal(bytes.length, image.size);
+  const dimensions = await sharp(bytes).metadata();
+  assert.deepEqual([dimensions.width, dimensions.height], [image.width, image.height]);
+  const center = await sharp(bytes).extract({ left: 569, top: 595, width: 1, height: 1 }).raw().toBuffer();
+  assert.ok(center[0] > 230 && center[1] < 40);
+  const footer = await sharp(bytes).extract({ left: 569, top: 1185, width: 1, height: 1 }).raw().toBuffer();
+  assert.ok(footer.some(value => value < 230));
+  assert.equal((await (await uploadImage(photo, 'product')).json()).url, image.url);
+  assert.equal((await uploadImage(Buffer.from('corrupt'), 'product')).status, 400);
+  assert.deepEqual(await fs.readdir(uploads), ['product-frames']);
+  assert.deepEqual(await fs.readdir(path.join(uploads, 'product-frames')), [path.basename(image.url)]);
+
+  const generalResponse = await uploadImage(photo);
+  assert.equal(generalResponse.status, 200);
+  const { url } = await generalResponse.json();
+  assert.match(url, /^\/uploads\/general-image-/);
+  const original = await fetch(base + url);
+  assert.equal(original.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await original.arrayBuffer()), photo);
+});
 
 async function waitForBatch(service) {
   for (let i = 0; i < 240; i++) {

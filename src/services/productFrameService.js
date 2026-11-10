@@ -68,12 +68,24 @@ async function prepareImage(source, frame, uploadsDir) {
     throw new FrameSourceError('الصورة تحتاج نسخة أصلية محلية.');
   }
 
+  const url = await saveFramedImage(input, frame, uploadsDir);
+  return { url, original };
+}
+
+async function loadFrame(file) {
+  const bytes = await fs.readFile(file);
+  const metadata = await sharp(bytes).metadata();
+  if (metadata.width !== FRAME_WIDTH || metadata.height !== FRAME_HEIGHT) throw new Error('Unexpected product frame dimensions.');
+  return { bytes, digest: createHash('sha256').update(bytes).digest() };
+}
+
+async function saveFramedImage(input, frame, uploadsDir) {
   const digest = createHash('sha256').update(frame.digest).update(input).digest('hex');
   const url = `/uploads/product-frames/v2-${digest}.jpg`;
   const output = framedPath(url, uploadsDir);
   try {
     await verifyOutput(output);
-    return { url, original };
+    return url;
   } catch {
     // A retry can reuse a verified file left by an interrupted database write.
   }
@@ -102,7 +114,14 @@ async function prepareImage(source, frame, uploadsDir) {
     .toBuffer();
   await writeAtomic(output, jpeg);
   await verifyOutput(output);
-  return { url, original };
+  return url;
+}
+
+async function frameUploadedProductImage(input, uploadsDir = UPLOADS_DIR) {
+  const frame = await loadFrame(FRAME_FILE);
+  const url = await saveFramedImage(input, frame, uploadsDir);
+  const { size } = await fs.stat(framedPath(url, uploadsDir));
+  return { url, width: FRAME_WIDTH, height: FRAME_HEIGHT, size };
 }
 
 async function verifyOutput(file) {
@@ -221,10 +240,7 @@ function createProductFrameService(prisma, { uploadsDir = UPLOADS_DIR, frameFile
           prisma.setting.updateMany({ where: { ...where, value: savedValue }, data: { updatedAt: new Date() } })
             .catch(error => console.error('Product frame batch heartbeat:', error));
         }, 15_000);
-        const bytes = await fs.readFile(frameFile);
-        const metadata = await sharp(bytes).metadata();
-        if (metadata.width !== FRAME_WIDTH || metadata.height !== FRAME_HEIGHT) throw new Error('Unexpected product frame dimensions.');
-        const frame = { bytes, digest: createHash('sha256').update(bytes).digest() };
+        const frame = await loadFrame(frameFile);
         let hasMore = false;
         let after = state.cursor?.id;
         let inclusive = Boolean(after);
@@ -314,4 +330,4 @@ function createProductFrameService(prisma, { uploadsDir = UPLOADS_DIR, frameFile
   return { status: async () => publicJob(await getRecord()), start };
 }
 
-module.exports = { FRAME_JOB_KEY, createProductFrameService };
+module.exports = { FRAME_JOB_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage };

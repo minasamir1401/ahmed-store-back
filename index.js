@@ -22,7 +22,7 @@ const {
   invalidateCatalogCache,
 } = require('./src/services/catalogFeedService');
 const { serveCatalogProductImage } = require('./src/services/catalogImageService');
-const { FRAME_JOB_KEY, createProductFrameService } = require('./src/services/productFrameService');
+const { FRAME_JOB_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('./src/services/productFrameService');
 const { retiredUploadHandler } = require('./src/utils/productFrameFiles');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -645,8 +645,12 @@ app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, r
     if (!isAllowedImageBuffer(req.file)) return res.status(400).json({ error: 'Invalid image content' });
     const altText = resolveImageAlt(req.body, req.file);
     const uploadType = req.query.type || req.body.type;
-    const optimized = await optimizeImage(req.file, uploadType);
     const uniqueSuffix = crypto.randomBytes(6).toString('hex');
+    if (uploadType === 'product') {
+      const framed = await frameUploadedProductImage(req.file.buffer);
+      return res.json({ id: uniqueSuffix, ...framed, thumbnailUrl: framed.url, altText });
+    }
+    const optimized = await optimizeImage(req.file, uploadType);
     const fileName = `${slugifyFileName(altText)}-${uniqueSuffix}.${optimized.extension}`;
     
     // Save file to the uploads directory
@@ -665,6 +669,7 @@ app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, r
       size: optimized.size
     });
   } catch(e) {
+    if (e instanceof FrameSourceError) return res.status(400).json({ error: e.message });
     res.status(500).json({ error: e.message });
   }
 });
