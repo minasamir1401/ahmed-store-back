@@ -3,7 +3,7 @@ const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 
 const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
-const FRAME_URL_PATTERN = /^\/uploads\/product-frames\/v2-[a-f0-9]{64}\.jpg$/;
+const FRAME_URL_PATTERN = /^\/uploads\/product-frames\/v[23]-[a-f0-9]{64}\.jpg$/;
 
 function localUploadName(source) {
   if (typeof source !== 'string' || !source.trim()) return null;

@@ -14,8 +14,11 @@ const BATCH_SIZE = 50;
 const LEASE_MS = 120_000;
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 32_000_000;
-const FRAME_WIDTH = 1139;
-const FRAME_HEIGHT = 1381;
+const TEMPLATE_WIDTH = 1139;
+const TEMPLATE_HEIGHT = 1381;
+const FRAME_SCALE = 2;
+const FRAME_WIDTH = TEMPLATE_WIDTH * FRAME_SCALE;
+const FRAME_HEIGHT = TEMPLATE_HEIGHT * FRAME_SCALE;
 const SELECT_PRODUCT = { id: true, title: true, image: true, images: true, updatedAt: true };
 
 class FrameSourceError extends Error {}
@@ -74,14 +77,32 @@ async function prepareImage(source, frame, uploadsDir) {
 
 async function loadFrame(file) {
   const bytes = await fs.readFile(file);
-  const metadata = await sharp(bytes).metadata();
-  if (metadata.width !== FRAME_WIDTH || metadata.height !== FRAME_HEIGHT) throw new Error('Unexpected product frame dimensions.');
-  return { bytes, digest: createHash('sha256').update(bytes).digest() };
+  const template = sharp(bytes);
+  const metadata = await template.metadata();
+  if (metadata.width !== TEMPLATE_WIDTH || metadata.height !== TEMPLATE_HEIGHT) throw new Error('Unexpected product frame dimensions.');
+  const { data, info } = await template.resize(FRAME_WIDTH, FRAME_HEIGHT)
+    .flatten({ background: '#fff' })
+    .toColourspace('srgb')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data, info, digest: createHash('sha256').update(bytes).digest() };
+}
+
+let defaultFrame;
+function getFrame(file = FRAME_FILE) {
+  if (file !== FRAME_FILE) return loadFrame(file);
+  if (!defaultFrame) {
+    defaultFrame = loadFrame(file).catch(error => {
+      defaultFrame = undefined;
+      throw error;
+    });
+  }
+  return defaultFrame;
 }
 
 async function saveFramedImage(input, frame, uploadsDir) {
   const digest = createHash('sha256').update(frame.digest).update(input).digest('hex');
-  const url = `/uploads/product-frames/v2-${digest}.jpg`;
+  const url = `/uploads/product-frames/v3-${digest}.jpg`;
   const output = framedPath(url, uploadsDir);
   try {
     await verifyOutput(output);
@@ -97,20 +118,21 @@ async function saveFramedImage(input, frame, uploadsDir) {
     photo = await image
       .rotate()
       .toColourspace('srgb')
-      .resize({ width: 920, height: 1000, fit: 'inside' })
-      .png()
+      .resize({ width: 920 * FRAME_SCALE, height: 1000 * FRAME_SCALE, fit: 'inside' })
+      .raw()
       .toBuffer({ resolveWithObject: true });
   } catch (error) {
     if (error instanceof FrameSourceError) throw error;
     throw new FrameSourceError('تعذر قراءة الصورة الأصلية أو تجاوزت حد الأبعاد الآمن.');
   }
-  const jpeg = await sharp(frame.bytes)
+  const jpeg = await sharp(frame.data, { raw: frame.info })
     .composite([{
       input: photo.data,
+      raw: photo.info,
       left: Math.floor((FRAME_WIDTH - photo.info.width) / 2),
-      top: Math.floor(595 - photo.info.height / 2),
+      top: Math.floor(595 * FRAME_SCALE - photo.info.height / 2),
     }])
-    .jpeg({ quality: 94, chromaSubsampling: '4:4:4' })
+    .jpeg({ quality: 97, chromaSubsampling: '4:4:4' })
     .toBuffer();
   await writeAtomic(output, jpeg);
   await verifyOutput(output);
@@ -118,7 +140,7 @@ async function saveFramedImage(input, frame, uploadsDir) {
 }
 
 async function frameUploadedProductImage(input, uploadsDir = UPLOADS_DIR) {
-  const frame = await loadFrame(FRAME_FILE);
+  const frame = await getFrame();
   const url = await saveFramedImage(input, frame, uploadsDir);
   const { size } = await fs.stat(framedPath(url, uploadsDir));
   return { url, width: FRAME_WIDTH, height: FRAME_HEIGHT, size };
@@ -126,7 +148,10 @@ async function frameUploadedProductImage(input, uploadsDir = UPLOADS_DIR) {
 
 async function verifyOutput(file) {
   const metadata = await sharp(file).metadata();
-  if (metadata.format !== 'jpeg' || metadata.width !== FRAME_WIDTH || metadata.height !== FRAME_HEIGHT) {
+  const legacy = path.basename(file).startsWith('v2-');
+  const width = legacy ? TEMPLATE_WIDTH : FRAME_WIDTH;
+  const height = legacy ? TEMPLATE_HEIGHT : FRAME_HEIGHT;
+  if (metadata.format !== 'jpeg' || metadata.width !== width || metadata.height !== height) {
     throw new Error('The saved product frame is not a valid portrait JPEG.');
   }
 }
@@ -240,7 +265,7 @@ function createProductFrameService(prisma, { uploadsDir = UPLOADS_DIR, frameFile
           prisma.setting.updateMany({ where: { ...where, value: savedValue }, data: { updatedAt: new Date() } })
             .catch(error => console.error('Product frame batch heartbeat:', error));
         }, 15_000);
-        const frame = await loadFrame(frameFile);
+        const frame = await getFrame(frameFile);
         let hasMore = false;
         let after = state.cursor?.id;
         let inclusive = Boolean(after);

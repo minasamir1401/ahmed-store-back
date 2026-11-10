@@ -46,7 +46,16 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
   await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const photo = await sharp({ create: { width: 400, height: 250, channels: 3, background: '#fc1010' } }).png().toBuffer();
+  const stripes = Buffer.alloc(16 * 40 * 3);
+  for (let row = 0; row < 40; row++) {
+    for (let column = 1; column < 16; column += 2) {
+      const offset = (row * 16 + column) * 3;
+      stripes.fill(255, offset, offset + 3);
+    }
+  }
+  const photo = await sharp({ create: { width: 1840, height: 1000, channels: 3, background: '#fc1010' } })
+    .composite([{ input: stripes, raw: { width: 16, height: 40, channels: 3 }, left: 500, top: 480 }])
+    .png().toBuffer();
   const uploadImage = (input, type = '') => {
     const form = new FormData();
     form.set('image', new Blob([input], { type: 'image/png' }), 'sample.png');
@@ -57,7 +66,8 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
   const response = await uploadImage(photo, 'product');
   assert.equal(response.status, 200);
   const image = await response.json();
-  assert.ok(framedPath(image.url, uploads));
+  assert.match(image.url, /^\/uploads\/product-frames\/v3-/);
+  assert.deepEqual([image.width, image.height], [2278, 2762]);
   assert.equal(image.altText, 'Fixture product');
   const served = await fetch(base + image.url);
   assert.equal(served.headers.get('content-type'), 'image/jpeg');
@@ -65,9 +75,12 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
   assert.equal(bytes.length, image.size);
   const dimensions = await sharp(bytes).metadata();
   assert.deepEqual([dimensions.width, dimensions.height], [image.width, image.height]);
-  const center = await sharp(bytes).extract({ left: 569, top: 595, width: 1, height: 1 }).raw().toBuffer();
+  assert.equal(dimensions.chromaSubsampling, '4:4:4');
+  const detail = await sharp(bytes).extract({ left: 719, top: 1190, width: 16, height: 1 }).greyscale().raw().toBuffer();
+  assert.ok(detail.every((value, i) => i % 2 ? value > 200 : value < 50), 'The compositor resolves single-pixel lines from a high-resolution upload');
+  const center = await sharp(bytes).extract({ left: 1138, top: 1190, width: 1, height: 1 }).raw().toBuffer();
   assert.ok(center[0] > 230 && center[1] < 40);
-  const footer = await sharp(bytes).extract({ left: 569, top: 1185, width: 1, height: 1 }).raw().toBuffer();
+  const footer = await sharp(bytes).extract({ left: 1138, top: 2370, width: 1, height: 1 }).raw().toBuffer();
   assert.ok(footer.some(value => value < 230));
   assert.equal((await (await uploadImage(photo, 'product')).json()).url, image.url);
   assert.equal((await uploadImage(Buffer.from('corrupt'), 'product')).status, 400);
@@ -131,6 +144,13 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   await prisma.product.create({
     data: { id: 'b', title: 'Corrupt fixture', price: 25, categoryId: category.id, image: '/uploads/corrupt.png', images: JSON.stringify([externalSource]) },
   });
+  const previousFrameUrl = `/uploads/product-frames/v2-${'a'.repeat(64)}.jpg`;
+  const previousFrame = framedPath(previousFrameUrl, uploads);
+  await fs.mkdir(path.dirname(previousFrame), { recursive: true });
+  await sharp({ create: { width: 1139, height: 1381, channels: 3, background: '#f08' } }).jpeg().toFile(previousFrame);
+  await prisma.product.create({
+    data: { id: 'legacy', title: 'Already framed', price: 20, categoryId: category.id, image: previousFrameUrl },
+  });
 
   const cacheName = product => {
     const hash = createHash('sha256').update(JSON.stringify([product.image, JSON.parse(product.images)])).digest('hex').slice(0, 16);
@@ -180,8 +200,8 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   assert.equal(partialGallery[49], gallery[49]);
   assert.equal(partialGallery.slice(0, 49).filter(url => framedPath(url, uploads)).length, 49);
   await fs.access(cacheName(partial));
-  assert.equal(partial.imageWidth, 1139);
-  assert.equal(partial.imageHeight, 1381);
+  assert.equal(partial.imageWidth, 2278);
+  assert.equal(partial.imageHeight, 2762);
   assert.equal(partial.price, 15);
 
   const ready = await service.start(interrupted.revision).then(() => waitForBatch(service));
@@ -221,7 +241,7 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   assert.equal(failures.images, JSON.stringify([externalSource]));
 
   async function pixel(url, x, y) {
-    return sharp(framedPath(url, uploads)).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer();
+    return sharp(framedPath(url, uploads)).extract({ left: x * 2, top: y * 2, width: 1, height: 1 }).raw().toBuffer();
   }
   for (const [url, channel] of [[current.image, 0], [finalGallery[0], 1], [finalGallery[49], 2]]) {
     const center = await pixel(url, 569, 595);
@@ -233,6 +253,7 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   assert.equal(retried.merged, 0);
   assert.equal(retried.totalMerged, 51);
   assert.equal(retried.attempted, 2);
+  assert.equal((await prisma.product.findUniqueOrThrow({ where: { id: 'legacy' } })).image, previousFrameUrl);
 
   await fs.copyFile(path.join(uploads, 'shared.png'), path.join(uploads, 'concurrent.png'));
   await prisma.product.create({
