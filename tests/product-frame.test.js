@@ -12,6 +12,7 @@ const { PrismaClient } = require('@prisma/client');
 const express = require('express');
 const multer = require('multer');
 const sharp = require('sharp');
+const { BANNER_IMAGE_ERROR, hideProductArtwork, loadProductArtwork } = require('../src/services/productArtworkService');
 const { FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('../src/services/productFrameService');
 const { framedPath, readFrameAlias, retiredUploadHandler } = require('../src/utils/productFrameFiles');
 
@@ -30,6 +31,12 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
 
   const app = express();
   app.use('/uploads', express.static(uploads));
+  const banner = await sharp({ create: { width: 420, height: 270, channels: 3, background: '#10fc10' } }).png().toBuffer();
+  await fs.writeFile(path.join(uploads, 'category.png'), banner);
+  const artwork = await loadProductArtwork({
+    category: { findMany: async () => [{ image: '/uploads/category.png' }] },
+    hero: { findUnique: async () => null },
+  }, { uploadsDir: uploads });
   const index = await fs.readFile(path.join(__dirname, '../index.js'), 'utf8');
   const route = index.slice(index.indexOf("app.post('/api/upload',"), index.indexOf("app.post('/api/upload-multiple',"));
   vm.runInNewContext(route, {
@@ -40,6 +47,7 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
     optimizeImage: async file => ({ data: file.buffer, extension: 'png' }),
     slugifyFileName: () => 'general-image',
     crypto: { randomBytes }, fs: require('node:fs'), path, __dirname: directory,
+    BANNER_IMAGE_ERROR, getProductArtwork: async () => artwork,
     FrameSourceError, frameUploadedProductImage: input => frameUploadedProductImage(input, uploads),
   });
   const server = app.listen(0, '127.0.0.1');
@@ -84,7 +92,10 @@ test('a product upload serves the merged JPEG and a general upload keeps its own
   assert.ok(footer.some(value => value < 230));
   assert.equal((await (await uploadImage(photo, 'product')).json()).url, image.url);
   assert.equal((await uploadImage(Buffer.from('corrupt'), 'product')).status, 400);
-  assert.deepEqual(await fs.readdir(uploads), ['product-frames']);
+  const rejected = await uploadImage(banner, 'product');
+  assert.equal(rejected.status, 400);
+  assert.deepEqual(await rejected.json(), { error: BANNER_IMAGE_ERROR });
+  assert.deepEqual((await fs.readdir(uploads)).sort(), ['category.png', 'product-frames']);
   assert.deepEqual(await fs.readdir(path.join(uploads, 'product-frames')), [path.basename(image.url)]);
 
   const generalResponse = await uploadImage(photo);
@@ -131,11 +142,12 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
     stdio: 'pipe',
   });
 
-  for (const [name, background] of [['front.png', '#fc1010'], ['shared.png', '#10fc10'], ['side.png', '#1010fc']]) {
+  for (const [name, background] of [['front.png', '#fc1010'], ['shared.png', '#10fc10'], ['side.png', '#1010fc'], ['category-banner.png', '#f08000']]) {
     await sharp({ create: { width: 420, height: 270, channels: 3, background } }).png().toFile(path.join(uploads, name));
   }
   const gallery = Array.from({ length: 50 }, (_, i) => i % 2 === 0 ? '/uploads/shared.png' : '/uploads/side.png');
-  const category = await prisma.category.create({ data: { name: 'Fixture', image: '/uploads/shared.png' } });
+  const category = await prisma.category.create({ data: { name: 'Fixture', image: '/uploads/category-banner.png' } });
+  await prisma.offer.create({ data: { title: 'Fixture', discount: '10%', image: '/uploads/shared.png' } });
   const original = await prisma.product.create({
     data: { id: 'a', title: 'Gallery fixture', price: 15, categoryId: category.id, image: '/uploads/front.png', images: JSON.stringify(gallery) },
   });
@@ -151,6 +163,19 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   await prisma.product.create({
     data: { id: 'legacy', title: 'Already framed', price: 20, categoryId: category.id, image: previousFrameUrl },
   });
+  const template = await fs.readFile(path.join(__dirname, '../assets/frame.png'));
+  const banner = await fs.readFile(path.join(uploads, 'category-banner.png'));
+  const bannerHash = createHash('sha256').update(createHash('sha256').update(template).digest()).update(banner).digest('hex');
+  const blockedFrame = `/uploads/product-frames/v2-${bannerHash}.jpg`;
+  await fs.copyFile(previousFrame, framedPath(blockedFrame, uploads));
+  const blockedProduct = await prisma.product.create({
+    data: { id: 'banner', title: 'Already framed category artwork', price: 19, categoryId: category.id, image: blockedFrame },
+  });
+  const artwork = await loadProductArtwork(prisma, { uploadsDir: uploads });
+  assert.equal(artwork.excludes('https://api.the-vitahub.com/uploads/category-banner.png?v=1'), true);
+  assert.equal(artwork.excludes(`/uploads/product-frames/v3-${bannerHash}.jpg`), true);
+  assert.equal(artwork.excludes(previousFrameUrl), false);
+  assert.equal(hideProductArtwork(blockedProduct, artwork.excludes).image, '');
 
   const cacheName = product => {
     const hash = createHash('sha256').update(JSON.stringify([product.image, JSON.parse(product.images)])).digest('hex').slice(0, 16);
@@ -162,6 +187,8 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   const interruptedService = createProductFrameService({
     setting: prisma.setting,
     product: prisma.product,
+    category: prisma.category,
+    hero: prisma.hero,
     $transaction: prisma.$transaction.bind(prisma),
     $queryRaw: async () => { throw new Error('Fixture interruption before cleanup'); },
   }, { uploadsDir: uploads });
@@ -223,11 +250,14 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
 
   const result = await service.start(ready.revision).then(() => waitForBatch(service));
   assert.equal(result.status, 'retry');
-  assert.equal(result.attempted, 3);
+  assert.equal(result.attempted, 4);
   assert.equal(result.merged, 1);
   assert.equal(result.totalMerged, 51);
   assert.equal(result.deleted, 2);
-  assert.equal(result.passFailed, 2);
+  assert.equal(result.passFailed, 3);
+  assert.equal(result.failures.find(failure => failure.productId === 'banner')?.message, BANNER_IMAGE_ERROR);
+  assert.equal((await prisma.product.findUniqueOrThrow({ where: { id: 'banner' } })).image, blockedFrame);
+  await fs.access(path.join(uploads, 'category-banner.png'));
   await assert.rejects(fs.access(path.join(uploads, 'side.png')), { code: 'ENOENT' });
   await fs.access(path.join(uploads, 'shared.png'));
   await fs.access(path.join(uploads, 'corrupt.png'));
@@ -252,7 +282,7 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   const retried = await service.start(result.revision).then(() => waitForBatch(service));
   assert.equal(retried.merged, 0);
   assert.equal(retried.totalMerged, 51);
-  assert.equal(retried.attempted, 2);
+  assert.equal(retried.attempted, 3);
   assert.equal((await prisma.product.findUniqueOrThrow({ where: { id: 'legacy' } })).image, previousFrameUrl);
 
   await fs.copyFile(path.join(uploads, 'shared.png'), path.join(uploads, 'concurrent.png'));
@@ -263,6 +293,8 @@ test('frames 50 image slots, resumes after cleanup interruption and deletes only
   const racingService = createProductFrameService({
     setting: prisma.setting,
     product: prisma.product,
+    category: prisma.category,
+    hero: prisma.hero,
     $queryRaw: prisma.$queryRaw.bind(prisma),
     $transaction: async commit => {
       await prisma.product.update({ where: { id: 'c' }, data: { images: updatedGallery } });

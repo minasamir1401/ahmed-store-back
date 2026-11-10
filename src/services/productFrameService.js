@@ -7,6 +7,7 @@ const { parseProductImages } = require('../utils/productImages');
 const { UPLOADS_DIR, localUploadName, framedPath, aliasPath, readFrameAlias, writeAtomic } = require('../utils/productFrameFiles');
 const { retainUnchangedImageCache } = require('./catalogImageService');
 const { invalidateCatalogCache } = require('./catalogFeedService');
+const { BANNER_IMAGE_ERROR, loadProductArtwork } = require('./productArtworkService');
 
 const FRAME_JOB_KEY = 'product-frame:v2';
 const FRAME_FILE = path.resolve(__dirname, '../../assets/frame.png');
@@ -34,7 +35,7 @@ function publicJob(record) {
   };
 }
 
-async function prepareImage(source, frame, uploadsDir) {
+async function prepareImage(source, frame, uploadsDir, artwork) {
   source = source.trim();
   const originalName = localUploadName(source);
   let original;
@@ -49,6 +50,7 @@ async function prepareImage(source, frame, uploadsDir) {
     if (!info) {
       const target = await readFrameAlias(uploadsDir, originalName);
       if (target) {
+        if (artwork.excludes(target)) throw new FrameSourceError(BANNER_IMAGE_ERROR);
         try {
           await verifyOutput(framedPath(target, uploadsDir));
         } catch {
@@ -71,6 +73,7 @@ async function prepareImage(source, frame, uploadsDir) {
     throw new FrameSourceError('الصورة تحتاج نسخة أصلية محلية.');
   }
 
+  if (artwork.excludesBytes(input)) throw new FrameSourceError(BANNER_IMAGE_ERROR);
   const url = await saveFramedImage(input, frame, uploadsDir);
   return { url, original };
 }
@@ -266,6 +269,7 @@ function createProductFrameService(prisma, { uploadsDir = UPLOADS_DIR, frameFile
             .catch(error => console.error('Product frame batch heartbeat:', error));
         }, 15_000);
         const frame = await getFrame(frameFile);
+        const artwork = await loadProductArtwork(prisma, { uploadsDir, frameDigest: frame.digest });
         let hasMore = false;
         let after = state.cursor?.id;
         let inclusive = Boolean(after);
@@ -284,16 +288,18 @@ function createProductFrameService(prisma, { uploadsDir = UPLOADS_DIR, frameFile
             for (let slot = firstSlot; slot < slots.length; slot++) {
               const source = slots[slot];
               if (!source) continue;
+              const isBanner = artwork.excludes(source);
               const existingFrame = framedPath(source, uploadsDir);
-              if (existingFrame && await fs.stat(existingFrame).then(info => info.isFile() && info.size > 500, () => false)) continue;
+              if (!isBanner && existingFrame && await fs.stat(existingFrame).then(info => info.isFile() && info.size > 500, () => false)) continue;
               if (state.attempted >= BATCH_SIZE) {
                 hasMore = true;
                 break scan;
               }
               const progress = { ...state, cursor: { id: product.id, slot: slot + 1 }, attempted: state.attempted + 1 };
               try {
+                if (isBanner) throw new FrameSourceError(BANNER_IMAGE_ERROR);
                 if (existingFrame) throw new FrameSourceError('الملف المدمج مفقود أو تالف على السيرفر.');
-                const { url, original } = await prepareImage(source, frame, uploadsDir);
+                const { url, original } = await prepareImage(source, frame, uploadsDir, artwork);
                 const replacement = slot === 0
                   ? { image: url, imageWidth: FRAME_WIDTH, imageHeight: FRAME_HEIGHT }
                   : { images: JSON.stringify(slots.slice(1).map((entry, index) => index === slot - 1 ? url : entry)) };

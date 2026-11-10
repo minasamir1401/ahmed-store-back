@@ -137,7 +137,7 @@ async function serveFallback(res) {
   return res.status(200).send(fallbackBlank);
 }
 
-async function serveCatalogProductImage(req, res, prisma) {
+async function serveCatalogProductImage(req, res, prisma, getProductArtwork) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
@@ -161,10 +161,16 @@ async function serveCatalogProductImage(req, res, prisma) {
       return await serveFallback(res);
     }
 
+    const excludes = getProductArtwork ? (await getProductArtwork()).excludes : () => false;
+    const galleryList = parseImages(product.images);
+    const targetImagePath = galleryIndex === null ? product.image : galleryList[galleryIndex] || product.image;
+    if (excludes(targetImagePath)) return await serveFallback(res);
+    const hasBlockedArtwork = excludes(product.image) || galleryList.some(excludes);
+
     // Key by source, so replacing a saved image cannot keep serving the old JPEG.
     // Description/price edits keep the same key and preserve cached remote photos.
     const stem = cacheStem(productId, galleryIndex);
-    const hash = sourceHash(product);
+    const hash = sourceHash(product) + (hasBlockedArtwork ? '_filtered' : '');
     const previousCachePath = path.join(CACHE_DIR, `${stem}_${hash}.jpg`);
     const cacheFilePath = path.join(CACHE_DIR, `${stem}_${hash}_${CATALOG_IMAGE_FORMAT}.jpg`);
     const legacyCachePath = path.join(CACHE_DIR, `${stem}.jpg`);
@@ -179,14 +185,6 @@ async function serveCatalogProductImage(req, res, prisma) {
       }
     }
 
-    let targetImagePath = product.image;
-    if (galleryIndex !== null) {
-      const galleryList = parseImages(product.images);
-      if (galleryList[galleryIndex]) {
-        targetImagePath = galleryList[galleryIndex];
-      }
-    }
-
     // Reprocess existing cached photos as well as new sources. Merely changing
     // resize() leaves small photos in the old cache indefinitely.
     let sourceBuffer = null;
@@ -194,7 +192,7 @@ async function serveCatalogProductImage(req, res, prisma) {
       sourceBuffer = await fs.promises.readFile(framedPath(targetImagePath));
     } else if (fs.existsSync(previousCachePath)) {
       sourceBuffer = await fs.promises.readFile(previousCachePath);
-    } else if (fs.existsSync(legacyCachePath)) {
+    } else if (!hasBlockedArtwork && fs.existsSync(legacyCachePath)) {
       const legacyStat = await fs.promises.stat(legacyCachePath);
       const updatedAt = new Date(product.updatedAt).getTime();
       if (legacyStat.size > 500 && Number.isFinite(updatedAt) && legacyStat.mtimeMs >= updatedAt) {
@@ -204,12 +202,11 @@ async function serveCatalogProductImage(req, res, prisma) {
     if (!sourceBuffer) sourceBuffer = await getSourceBuffer(targetImagePath);
 
     // If main image failed, try first gallery image
-    if (!sourceBuffer && targetImagePath !== product.image) {
+    if (!sourceBuffer && targetImagePath !== product.image && !excludes(product.image)) {
       sourceBuffer = await getSourceBuffer(product.image);
     }
     if (!sourceBuffer && product.images) {
-      const galleryList = parseImages(product.images);
-      for (const item of galleryList) {
+      for (const item of galleryList.filter(source => !excludes(source))) {
         sourceBuffer = await getSourceBuffer(item);
         if (sourceBuffer) break;
       }

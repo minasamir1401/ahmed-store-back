@@ -1,5 +1,6 @@
 const XLSX = require('xlsx');
 const fs = require('node:fs');
+const { loadProductArtwork } = require('./productArtworkService');
 
 const IMPORT_JOB_TIMEOUT = 10 * 60 * 1000;
 const interruptedJobMessage = 'انقطع تنفيذ الاستيراد قبل تأكيد النتيجة النهائية. قد تكون بعض المنتجات قد حُفظت؛ راجع القائمة قبل إعادة الاستيراد.';
@@ -848,6 +849,8 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
     }
   }
 
+  const artwork = await loadProductArtwork(prisma);
+
   // Pre-fetch all products into in-memory maps to avoid N round-trip queries
   const existingProducts = await prisma.product.findMany({
     select: { id: true, title: true, titleEn: true }
@@ -917,14 +920,16 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
           sizeOptions: item.sizeOptions || undefined
         };
 
-        if (item.image) {
-          updatePayload.image = item.image;
+        const image = item.image && !artwork.excludes(item.image) ? item.image : '';
+        const backImage = item.backImage && !artwork.excludes(item.backImage) ? item.backImage : '';
+        if (image) {
+          updatePayload.image = image;
         }
         if (item.imageAlt) {
           updatePayload.imageAlt = item.imageAlt;
         }
-        if (item.backImage) {
-          updatePayload.images = JSON.stringify([item.backImage]);
+        if (backImage) {
+          updatePayload.images = JSON.stringify([backImage]);
         }
 
         if (existingId) {
@@ -934,7 +939,6 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
           });
           updatedCount++;
         } else {
-          const fallbackImage = item.image || (category && category.image) || 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=600&q=80';
           const created = await prisma.product.create({
             data: {
               title: item.title,
@@ -968,8 +972,8 @@ async function importProductsFromExcel(filePath, prismaClient, { onProgress, sig
               discountValue: item.discountValue !== null ? item.discountValue : null,
               sizes: item.sizes || null,
               expiryDate: item.expiryDate || null,
-              image: fallbackImage,
-              images: item.backImage ? JSON.stringify([item.backImage]) : null,
+              image,
+              images: backImage ? JSON.stringify([backImage]) : null,
               imageAlt: item.imageAlt || null,
               categoryId: category ? category.id : undefined,
               brandId: brand ? brand.id : null

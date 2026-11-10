@@ -22,6 +22,8 @@ const {
   invalidateCatalogCache,
 } = require('./src/services/catalogFeedService');
 const { serveCatalogProductImage } = require('./src/services/catalogImageService');
+const { BANNER_IMAGE_ERROR, createProductArtworkGuard, hideProductArtwork } = require('./src/services/productArtworkService');
+const { parseProductImages } = require('./src/utils/productImages');
 const { FRAME_JOB_KEY, FrameSourceError, createProductFrameService, frameUploadedProductImage } = require('./src/services/productFrameService');
 const { retiredUploadHandler } = require('./src/utils/productFrameFiles');
 
@@ -43,6 +45,12 @@ app.use(compression());
 app.set('trust proxy', 1);
 const prisma = new PrismaClient();
 const productFrames = createProductFrameService(prisma);
+const getProductArtwork = createProductArtworkGuard(prisma);
+
+async function hasProductBanner(image, images) {
+  const { excludes } = await getProductArtwork();
+  return excludes(image) || parseProductImages(images).some(source => source !== '/logo-header.jpg' && excludes(source));
+}
 const PORT = process.env.PORT || 5000;
 const LISTEN_HOST = process.env.VITAHUB_LISTEN_HOST || '0.0.0.0';
 const SITE_URL = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
@@ -647,6 +655,8 @@ app.post('/api/upload', adminAuthenticate, upload.single('image'), async (req, r
     const uploadType = req.query.type || req.body.type;
     const uniqueSuffix = crypto.randomBytes(6).toString('hex');
     if (uploadType === 'product') {
+      const artwork = await getProductArtwork();
+      if (artwork.excludesBytes(req.file.buffer)) return res.status(400).json({ error: BANNER_IMAGE_ERROR });
       const framed = await frameUploadedProductImage(req.file.buffer);
       return res.json({ id: uniqueSuffix, ...framed, thumbnailUrl: framed.url, altText });
     }
@@ -2754,7 +2764,12 @@ app.get('/api/brands/:id', async (req, res) => {
       }
     });
     if (!brand) return res.status(404).json({ error: 'Not found' });
-    res.json({ ...brand, totalProducts: brand._count.products, page, limit });
+    const { excludes } = await getProductArtwork();
+    res.json({
+      ...brand,
+      products: brand.products.map(product => hideProductArtwork(product, excludes)),
+      totalProducts: brand._count.products, page, limit
+    });
   } catch (error) {
     sendSafeError(res, error);
   }
@@ -2847,11 +2862,11 @@ app.get('/api/catalog/status', async (req, res) => {
 });
 
 app.get(['/api/catalog/image/:productId', '/api/catalog/image/:productId.jpg'], async (req, res) => {
-  await serveCatalogProductImage(req, res, prisma);
+  await serveCatalogProductImage(req, res, prisma, getProductArtwork);
 });
 
 app.get('/api/catalog/image/:productId/gallery/:galleryIndex.jpg', async (req, res) => {
-  await serveCatalogProductImage(req, res, prisma);
+  await serveCatalogProductImage(req, res, prisma, getProductArtwork);
 });
 
 // ── Products Endpoints ────────────────────────────────────────
@@ -2940,8 +2955,10 @@ app.get('/api/products', async (req, res) => {
       prisma.product.count({ where })
     ]);
 
-    if (isLegacyList) return res.json(products);
-    res.json({ items: products, total, page, limit: take, maxPrice: maxProductPrice });
+    const { excludes } = await getProductArtwork();
+    const items = products.map(product => hideProductArtwork(product, excludes));
+    if (isLegacyList) return res.json(items);
+    res.json({ items, total, page, limit: take, maxPrice: maxProductPrice });
   } catch (error) {
     sendSafeError(res, error);
   }
@@ -2955,17 +2972,19 @@ app.get('/api/products/:id', async (req, res) => {
       include: { category: true, brand: true }
     });
     if (!product) return res.status(404).json({ error: 'Not found' });
-    const imageId = parseDbImageUrl(product.image);
-    if (!imageId) return res.json(product);
+    const { excludes } = await getProductArtwork();
+    const visible = hideProductArtwork(product, excludes);
+    const imageId = parseDbImageUrl(visible.image);
+    if (!imageId) return res.json(visible);
     const imageMeta = await prisma.imageStore.findUnique({
       where: { id: imageId },
       select: { altText: true, width: true, height: true }
     });
     res.json({
-      ...product,
-      imageAlt: product.imageAlt || imageMeta?.altText || product.title,
-      imageWidth: product.imageWidth || imageMeta?.width,
-      imageHeight: product.imageHeight || imageMeta?.height
+      ...visible,
+      imageAlt: visible.imageAlt || imageMeta?.altText || visible.title,
+      imageWidth: visible.imageWidth || imageMeta?.width,
+      imageHeight: visible.imageHeight || imageMeta?.height
     });
   } catch (error) {
     sendSafeError(res, error);
@@ -2984,7 +3003,8 @@ app.post('/api/products', adminAuthenticate, async (req, res) => {
     const cleanTitle = normalizeString(title, 300);
     const cleanPrice = toPositiveNumber(price, 'price');
     if (!cleanTitle || !categoryId) return res.status(400).json({ error: 'title, categoryId and price are required' });
-    const cleanImage = image || 'https://placehold.co/400x400?text=No+Image';
+    if (await hasProductBanner(image, images)) return res.status(400).json({ error: BANNER_IMAGE_ERROR });
+    const cleanImage = image || '';
     const cleanImageAlt = normalizeString(imageAlt || cleanTitle, 180);
     const product = await prisma.product.create({
       data: { 
@@ -3116,6 +3136,7 @@ app.patch('/api/products/:id', adminAuthenticate, async (req, res) => {
     seoKeywordsEn, seoDescEn, dosageCalculator, faqs, expiryDate
   } = req.body;
   try {
+    if ((image || images) && await hasProductBanner(image, images)) return res.status(400).json({ error: BANNER_IMAGE_ERROR });
     const cleanPrice = price !== undefined ? toPositiveNumber(price, 'price') : undefined;
     const cleanImageAlt = imageAlt !== undefined ? normalizeString(imageAlt, 180) : undefined;
     const product = await prisma.product.update({

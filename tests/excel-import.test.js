@@ -50,6 +50,7 @@ function database(products = []) {
   });
   const prisma = {
     category: lookup(categories),
+    hero: { findUnique: async () => null },
     brand: lookup(brands),
     product: {
       findMany: async () => [...stored.values()].map(({ id, title, titleEn }) => ({ id, title, titleEn })),
@@ -171,6 +172,21 @@ test('missing prices preserve existing prices while an explicit zero is imported
   assert.equal(db.stored.get('keep').price, 999);
   assert.equal(db.stored.get('zero').price, 0);
   assert.equal(db.creates[0].price, 0);
+  assert.equal(db.creates[0].image, '');
+});
+
+test('Excel import preserves a product image when the spreadsheet points to category artwork', async t => {
+  const file = workbook(t, [
+    ['English Title', 'Category', 'Front Image URL'],
+    ['Existing product', 'Test category', 'https://api.the-vitahub.com/uploads/category.jpg'],
+    ['New product', 'Test category', '/uploads/category.jpg'],
+  ]);
+  const db = database([{ id: 'existing', title: 'Existing product', image: '/uploads/actual-product.jpg' }]);
+  const result = await importProductsFromExcel(file, db.prisma);
+  assert.equal(result.updatedCount, 1);
+  assert.equal(result.importedCount, 1);
+  assert.equal(db.stored.get('existing').image, '/uploads/actual-product.jpg');
+  assert.equal(db.creates[0].image, '');
 });
 
 test('a background job returns before writes, persists final status and removes its private upload', async t => {
