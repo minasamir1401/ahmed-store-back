@@ -4,6 +4,7 @@ const sharp = require('sharp');
 const { createHash, randomUUID } = require('node:crypto');
 const { parseProductImages: parseImages } = require('../utils/productImages');
 const { CATALOG_IMAGE_FORMAT, normalizeCatalogImage } = require('../utils/catalogImageFormat');
+const { framedPath, localUploadName, readFrameAlias } = require('../utils/productFrameFiles');
 
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 const CACHE_DIR = path.join(UPLOADS_DIR, 'catalog-cache');
@@ -18,6 +19,43 @@ function ensureCacheDir() {
 function sanitizeProductId(rawId) {
   if (!rawId) return '';
   return String(rawId).replace(/\.(jpg|jpeg|png|webp|avif)$/i, '').trim();
+}
+
+function sourceHash(product) {
+  return createHash('sha256').update(JSON.stringify([product.image, parseImages(product.images)])).digest('hex').slice(0, 16);
+}
+
+function cacheStem(productId, galleryIndex) {
+  return galleryIndex === null ? productId : `${productId}_g${galleryIndex}`;
+}
+
+async function retainUnchangedImageCache(before, after, changedSlot, uploadsDir) {
+  const previousHash = sourceHash(before);
+  const newHash = sourceHash(after);
+  const cacheDir = path.join(uploadsDir, 'catalog-cache');
+  const gallery = parseImages(before.images);
+  for (let slot = 0; slot <= gallery.length; slot++) {
+    if (slot === changedSlot || framedPath(slot === 0 ? before.image : gallery[slot - 1], uploadsDir)) continue;
+    const stem = cacheStem(before.id, slot === 0 ? null : slot - 1);
+    for (const suffix of [`_${CATALOG_IMAGE_FORMAT}.jpg`, '.jpg']) {
+      const oldFile = path.join(cacheDir, `${stem}_${previousHash}${suffix}`);
+      const newFile = path.join(cacheDir, `${stem}_${newHash}${suffix}`);
+      await fs.promises.link(oldFile, newFile).catch(error => {
+        if (!['ENOENT', 'EEXIST'].includes(error.code)) throw error;
+      });
+    }
+    const legacyFile = path.join(cacheDir, `${stem}.jpg`);
+    const legacy = await fs.promises.stat(legacyFile).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    });
+    if (legacy?.size > 500 && legacy.mtimeMs >= new Date(before.updatedAt).getTime()) {
+      const newFile = path.join(cacheDir, `${stem}_${newHash}.jpg`);
+      await fs.promises.link(legacyFile, newFile).catch(error => {
+        if (!['ENOENT', 'EEXIST'].includes(error.code)) throw error;
+      });
+    }
+  }
 }
 
 async function getSourceBuffer(imagePath) {
@@ -58,6 +96,10 @@ async function getSourceBuffer(imagePath) {
   if (fs.existsSync(encodedPath)) {
     return await fs.promises.readFile(encodedPath);
   }
+
+  const name = localUploadName(trimmed);
+  const alias = name && await readFrameAlias(UPLOADS_DIR, name);
+  if (alias) return fs.promises.readFile(framedPath(alias));
 
   return null;
 }
@@ -110,7 +152,6 @@ async function serveCatalogProductImage(req, res, prisma) {
       return await serveFallback(res);
     }
 
-    const cacheKey = galleryIndex !== null ? `${productId}_g${galleryIndex}.jpg` : `${productId}.jpg`;
     const product = await prisma.product.findUnique({
       where: { id: productId },
       select: { id: true, image: true, images: true, updatedAt: true },
@@ -122,10 +163,11 @@ async function serveCatalogProductImage(req, res, prisma) {
 
     // Key by source, so replacing a saved image cannot keep serving the old JPEG.
     // Description/price edits keep the same key and preserve cached remote photos.
-    const sourceHash = createHash('sha256').update(JSON.stringify([product.image, parseImages(product.images)])).digest('hex').slice(0, 16);
-    const previousCachePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}.jpg`));
-    const cacheFilePath = path.join(CACHE_DIR, cacheKey.replace(/\.jpg$/, `_${sourceHash}_${CATALOG_IMAGE_FORMAT}.jpg`));
-    const legacyCachePath = path.join(CACHE_DIR, cacheKey);
+    const stem = cacheStem(productId, galleryIndex);
+    const hash = sourceHash(product);
+    const previousCachePath = path.join(CACHE_DIR, `${stem}_${hash}.jpg`);
+    const cacheFilePath = path.join(CACHE_DIR, `${stem}_${hash}_${CATALOG_IMAGE_FORMAT}.jpg`);
+    const legacyCachePath = path.join(CACHE_DIR, `${stem}.jpg`);
 
     if (fs.existsSync(cacheFilePath)) {
       const stat = await fs.promises.stat(cacheFilePath);
@@ -148,7 +190,9 @@ async function serveCatalogProductImage(req, res, prisma) {
     // Reprocess existing cached photos as well as new sources. Merely changing
     // resize() leaves small photos in the old cache indefinitely.
     let sourceBuffer = null;
-    if (fs.existsSync(previousCachePath)) {
+    if (framedPath(targetImagePath)) {
+      sourceBuffer = await fs.promises.readFile(framedPath(targetImagePath));
+    } else if (fs.existsSync(previousCachePath)) {
       sourceBuffer = await fs.promises.readFile(previousCachePath);
     } else if (fs.existsSync(legacyCachePath)) {
       const legacyStat = await fs.promises.stat(legacyCachePath);
@@ -196,4 +240,5 @@ async function serveCatalogProductImage(req, res, prisma) {
 
 module.exports = {
   serveCatalogProductImage,
+  retainUnchangedImageCache,
 };

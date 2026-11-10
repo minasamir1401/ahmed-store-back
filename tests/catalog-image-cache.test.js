@@ -28,6 +28,7 @@ function harness(product, legacy) {
       };
       if (name === '../utils/productImages') return require('../src/utils/productImages');
       if (name === '../utils/catalogImageFormat') return require('../src/utils/catalogImageFormat');
+      if (name === '../utils/productFrameFiles') return require('../src/utils/productFrameFiles');
       return require(name);
     },
   });

@@ -22,6 +22,8 @@ const {
   invalidateCatalogCache,
 } = require('./src/services/catalogFeedService');
 const { serveCatalogProductImage } = require('./src/services/catalogImageService');
+const { FRAME_JOB_KEY, createProductFrameService } = require('./src/services/productFrameService');
+const { retiredUploadHandler } = require('./src/utils/productFrameFiles');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -40,7 +42,9 @@ const app = express();
 app.use(compression());
 app.set('trust proxy', 1);
 const prisma = new PrismaClient();
+const productFrames = createProductFrameService(prisma);
 const PORT = process.env.PORT || 5000;
+const LISTEN_HOST = process.env.VITAHUB_LISTEN_HOST || '0.0.0.0';
 const SITE_URL = (process.env.SITE_URL || 'https://the-vitahub.com').replace(/\/+$/, '');
 
 // Slug helpers for product URLs
@@ -549,6 +553,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
     res.setHeader('X-Robots-Tag', 'index, follow');
   }
 }));
+app.use('/uploads', retiredUploadHandler());
 
 
 // ── Multer Configuration ──────────────────────────────────────
@@ -2110,7 +2115,7 @@ app.get('/api/settings', async (req, res) => {
 
 app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
   try {
-    const allRows = await prisma.setting.findMany();
+    const allRows = await prisma.setting.findMany({ where: { key: { not: FRAME_JOB_KEY } } });
     const settings = Object.fromEntries(allRows.map((r) => [r.key, r.value]));
 
     const { resolveEmailSettings } = require('./src/services/emailService');
@@ -2133,6 +2138,29 @@ app.get('/api/admin/settings', adminAuthenticate, async (req, res) => {
   } catch (error) {
     console.error('GET /api/admin/settings error:', error);
     res.status(500).json({ error: 'حدث خطأ أثناء جلب الإعدادات' });
+  }
+});
+
+app.get('/api/admin/settings/product-frames', adminAuthenticate, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    res.json(await productFrames.status());
+  } catch (error) {
+    sendSafeError(res, error);
+  }
+});
+
+app.post('/api/admin/settings/product-frames', adminAuthenticate, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const revision = req.body?.revision;
+  if (revision !== null && (typeof revision !== 'string' || !/^[a-f0-9-]{36}$/.test(revision))) {
+    return res.status(400).json({ error: 'حدّث حالة دفعة الصور وحاول مرة أخرى.' });
+  }
+  try {
+    const job = await productFrames.start(revision);
+    res.status(job.status === 'running' ? 202 : 200).json(job);
+  } catch (error) {
+    sendSafeError(res, error);
   }
 });
 
@@ -4258,13 +4286,12 @@ async function runAutoCleanup() {
   }
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, LISTEN_HOST, () => {
   console.log(`Server is running on port ${PORT}`);
-  initWhatsApp();
-  
-  // Run background cleanup on startup
-  runAutoCleanup();
-  
-  // Run background cleanup every 24 hours
-  setInterval(runAutoCleanup, 24 * 60 * 60 * 1000);
+  if (process.env.WHATSAPP_ENABLED !== 'false') initWhatsApp();
+
+  if (process.env.AUTO_IMAGE_CLEANUP_ENABLED !== 'false') {
+    runAutoCleanup();
+    setInterval(runAutoCleanup, 24 * 60 * 60 * 1000);
+  }
 });
